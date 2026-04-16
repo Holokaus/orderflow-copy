@@ -2171,21 +2171,29 @@ class StrategyOptimizer:
         }
         
         # Strategy-specific parameters (mapped via param_key in strategy definition)
+        # [FIXED] Realistic ranges to prevent 10+ day optimizations with all-default results
         strategy_params = {
             "absorption": {
-                # Entry conditions
-                "abs__entry_str_min":      {"min": 0.15, "max": 0.65, "step": 0.05, "default": 0.30},
-                "abs__entry_vol_min":      {"min": 0.7, "max": 2.5, "step": 0.1, "default": 1.0},
-                "abs__entry_chg60_max":    {"min": 0.0003, "max": 0.004, "step": 0.0002, "default": 0.001},
-                "abs__entry_delta_min":    {"min": 0, "max": 5000, "step": 100, "default": 0, "type": "int"},
-                "abs__entry_imbal_min":    {"min": 0.02, "max": 0.20, "step": 0.02, "default": 0.05},
-                "abs__entry_poc_range":    {"min": 0.001, "max": 0.015, "step": 0.001, "default": 0.005},
+                # Entry conditions - [FIXED] Narrow realistic bounds for XRP/USDT
+                "abs__entry_str_min":       {"min": 0.2, "max": 0.8, "step": 0.05, "default": 0.45},
+                "abs__entry_vol_min":       {"min": 0.5, "max": 3.0, "step": 0.1, "default": 1.0},
+                # Absorption needs tight stability: 0.05%-0.5% over 60s
+                "abs__entry_chg60_max":     {"min": 0.0005, "max": 0.005, "step": 0.0005, "default": 0.002},
+                # 5000 is realistic max for XRP; prevents numerical instability
+                "abs__entry_delta_min":     {"min": 0, "max": 5000, "step": 100, "default": 0, "type": "int"},
+                # 2%-40% imbalance is realistic; 70% is extreme and rare
+                "abs__entry_imbal_min":     {"min": 0.02, "max": 0.40, "step": 0.01, "default": 0.08},
+                # POC proximity must be tight: 0.1%-1.5%; wider ranges break strategy logic
+                "abs__entry_poc_range":     {"min": 0.001, "max": 0.015, "step": 0.001, "default": 0.006},
                 
                 # Filters (CRITICAL: These control market quality rejection thresholds)
-                "abs__filter_spread_max":  {"min": 5.0, "max": 25.0, "step": 2.0, "default": 15.0},  # Max acceptable spread (bps)
-                "abs__filter_bid_min":     {"min": 500.0, "max": 5000.0, "step": 250.0, "default": 1500.0},  # Min bid depth
-                "abs__filter_ask_min":     {"min": 500.0, "max": 5000.0, "step": 250.0, "default": 1500.0},  # Min ask depth
-                "abs__filter_chg300_range": {"min": 0.002, "max": 0.020, "step": 0.001, "default": 0.005},  # Dead market filter (symmetric)
+                # 5-50 bps spread filter; prevents rejecting all signals or accepting all
+                "abs__filter_spread_max":   {"min": 5.0, "max": 50.0, "step": 1.0, "default": 15.0},
+                # $1k-$20k depth prevents overfitting to illiquid conditions
+                "abs__filter_bid_min":      {"min": 1000.0, "max": 20000.0, "step": 500.0, "default": 2000.0},
+                "abs__filter_ask_min":      {"min": 1000.0, "max": 20000.0, "step": 500.0, "default": 2000.0},
+                # Tight regime filter: 0.3%-2% over 300s; filters trending/choppy markets
+                "abs__filter_chg300_range": {"min": 0.003, "max": 0.02, "step": 0.001, "default": 0.006},
             }
             # TODO: Add other strategies (delta_divergence, liquidity_sweep, etc.) here
         }

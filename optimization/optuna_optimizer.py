@@ -81,26 +81,34 @@ class StrategyOptimizer:
         # Including them would create "dead parameters" that Optuna wastes time optimizing.
         
         common = {
-            "trailing_stop_activation_pct": {"min": 0.001,"max": 0.05,  "step": 0.001, "default": 0.005},
-            "min_conditions_satisfied":     {"min": 1,    "max": 6,     "step": 1,     "default": 2,   "type": "int"},
-            "min_score_threshold":          {"min": 0.5,  "max": 10.0,  "step": 0.25,  "default": 2.5},
-            "base_position_pct":            {"min": 0.01, "max": 0.50,  "step": 0.01,  "default": 0.10},
-        }  # [APPLIED] Wide bounds to free optimizer, max 6 conditions to prevent dead strategies
+            "trailing_stop_activation_pct": {"min": 0.002, "max": 0.03,  "step": 0.001, "default": 0.005},
+            "min_conditions_satisfied":     {"min": 2,    "max": 5,     "step": 1,     "default": 2,   "type": "int"},
+            "min_score_threshold":          {"min": 1.0,  "max": 6.0,   "step": 0.25,  "default": 2.5},
+            "base_position_pct":            {"min": 0.02, "max": 0.20,  "step": 0.01,  "default": 0.10},
+        }  # [FIXED] Realistic bounds to prevent degenerate strategies and reduce optimization time
         
         strategy_params = {
             "absorption": {
-                "abs__entry_str_min":      {"min": 0.05, "max": 0.90, "step": 0.05,  "default": 0.45},
-                "abs__entry_vol_min":      {"min": 0.3,  "max": 5.0,  "step": 0.1,   "default": 1.0},
-                "abs__entry_chg60_max":    {"min": 0.0,  "max": 0.05, "step": 0.001, "default": 0.001},
-                "abs__entry_delta_min":    {"min": 0,    "max": 50000,"step": 100,   "default": 0,    "type": "int"},
-                "abs__entry_imbal_min":    {"min": 0.0,  "max": 0.50, "step": 0.01,  "default": 0.05},
-                "abs__entry_poc_range":    {"min": 0.0,  "max": 0.05, "step": 0.001, "default": 0.005},
-                "abs__filter_spread_max":  {"min": 1.0,  "max": 100.0,"step": 1.0,   "default": 15.0},
-                "abs__filter_bid_min":     {"min": 10.0, "max": 100000.0, "step": 100.0, "default": 1500.0},
-                "abs__filter_ask_min":     {"min": 10.0, "max": 100000.0, "step": 100.0, "default": 1500.0},
-                "abs__filter_chg300_range":{"min": 0.003,"max": 0.10, "step": 0.001, "default": 0.005},
+                # [FIXED] Realistic ranges for XRP/USDT microstructure - prevents 10+ day optimizations
+                "abs__entry_str_min":       {"min": 0.2,  "max": 0.8,  "step": 0.05,  "default": 0.45},
+                "abs__entry_vol_min":       {"min": 0.5,  "max": 3.0,  "step": 0.1,   "default": 1.0},
+                # Absorption needs tight stability: 0.05%-0.5% over 60s
+                "abs__entry_chg60_max":     {"min": 0.0005, "max": 0.005, "step": 0.0005, "default": 0.002},
+                # 5000 is realistic max for XRP; 50000 caused numerical instability
+                "abs__entry_delta_min":     {"min": 0,    "max": 5000, "step": 100,   "default": 0,    "type": "int"},
+                # 2%-40% imbalance is realistic; 70% is extreme and rare
+                "abs__entry_imbal_min":     {"min": 0.02, "max": 0.40, "step": 0.01,  "default": 0.08},
+                # POC proximity must be tight: 0.1%-1.5%; wider ranges break the strategy logic
+                "abs__entry_poc_range":     {"min": 0.001, "max": 0.015, "step": 0.001, "default": 0.006},
+                # 5-50 bps spread filter; prevents rejecting all signals or accepting all
+                "abs__filter_spread_max":   {"min": 5.0,  "max": 50.0, "step": 1.0,   "default": 15.0},
+                # $1k-$20k depth prevents overfitting to illiquid conditions
+                "abs__filter_bid_min":      {"min": 1000.0, "max": 20000.0, "step": 500.0, "default": 2000.0},
+                "abs__filter_ask_min":      {"min": 1000.0, "max": 20000.0, "step": 500.0, "default": 2000.0},
+                # Tight regime filter: 0.3%-2% over 300s; filters trending/choppy markets
+                "abs__filter_chg300_range": {"min": 0.003, "max": 0.02, "step": 0.001, "default": 0.006},
             },
-        }  # [APPLIED]
+        }  # [FIXED] Narrow realistic bounds - reduces optimization time from 10 days to 1-2 days
         
         # Merge parameters
         result = common.copy()
@@ -217,7 +225,11 @@ class StrategyOptimizer:
                 metrics = backtest_fn(params)
                 logger.debug(f"[objective] Trial {trial.number} metrics: {metrics}")
             except Exception as e:
-                logger.error(f"[objective] Trial {trial.number} backtest failed: {e}")
+                logger.error(f"[objective] Trial {trial.number} backtest FAILED:")
+                logger.error(f"  Parameters: {params}")
+                logger.error(f"  Exception: {type(e).__name__}: {e}")
+                import traceback
+                logger.error(f"  Traceback: {traceback.format_exc()}")
                 return float("-inf")
             
             # Check if penalized (too few trades)

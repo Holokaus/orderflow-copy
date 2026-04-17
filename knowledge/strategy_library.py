@@ -464,13 +464,16 @@ def create_absorption_strategy() -> StrategyDefinition:
                 param_key="abs__filter_ask_min"
             ),
             # Price change filter: REJECT if outside symmetric range (dead/choppy market protection)
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.005,
-                threshold_high=0.005,
-                param_key="abs__filter_chg300_range"
-            ),
+            #StrategyCondition(
+                #feature="price_change_pct_300s",
+                #operator="between",
+                #threshold=-0.005,
+                #threshold_high=0.005,
+                #param_key="abs__filter_chg300_range"
+            #),
+            # BETWEEN operator: REJECT if value is INSIDE [-threshold, +threshold]
+            # This means: "Only trade when price has moved significantly in last 300s"
+            # Comment was misleading — it said "reject if outside" but code does the opposite
         ],
         
         min_conditions_satisfied=2,
@@ -577,12 +580,16 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
                 operator="<",
                 threshold=3.0  # Reject thin asks
             ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
-            ),
+            #StrategyCondition(
+                #feature="price_change_pct_300s",
+                #operator="between",
+                #threshold=-0.005,
+                #threshold_high=0.005,
+                #param_key="abs__filter_chg300_range"
+            #),
+            # BETWEEN operator: REJECT if value is INSIDE [-threshold, +threshold]
+            # This means: "Only trade when price has moved significantly in last 300s"
+            # Comment was misleading — it said "reject if outside" but code does the opposite
         ],
         
         min_conditions_satisfied=2,
@@ -662,12 +669,16 @@ def create_liquidity_sweep_strategy() -> StrategyDefinition:
                 operator="<",
                 threshold=3.0  # Reject thin asks
             ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
-            ),
+            #StrategyCondition(
+                #feature="price_change_pct_300s",
+                #operator="between",
+                #threshold=-0.005,
+                #threshold_high=0.005,
+                #param_key="abs__filter_chg300_range"
+            #),
+            # BETWEEN operator: REJECT if value is INSIDE [-threshold, +threshold]
+            # This means: "Only trade when price has moved significantly in last 300s"
+            # Comment was misleading — it said "reject if outside" but code does the opposite
         ],
         
         min_conditions_satisfied=2,
@@ -748,12 +759,16 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
                 operator="<",
                 threshold=3.0  # Reject thin asks
             ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
-            ),
+            #StrategyCondition(
+                #feature="price_change_pct_300s",
+                #operator="between",
+                #threshold=-0.005,
+                #threshold_high=0.005,
+                #param_key="abs__filter_chg300_range"
+            #),
+            # BETWEEN operator: REJECT if value is INSIDE [-threshold, +threshold]
+            # This means: "Only trade when price has moved significantly in last 300s"
+            # Comment was misleading — it said "reject if outside" but code does the opposite
         ],
         
         min_conditions_satisfied=2,
@@ -838,12 +853,16 @@ def create_value_area_strategy() -> StrategyDefinition:
                 operator="<",
                 threshold=3.0  # Reject thin asks
             ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
-            ),
+            #StrategyCondition(
+                #feature="price_change_pct_300s",
+                #operator="between",
+                #threshold=-0.005,
+                #threshold_high=0.005,
+                #param_key="abs__filter_chg300_range"
+            #),
+            # BETWEEN operator: REJECT if value is INSIDE [-threshold, +threshold]
+            # This means: "Only trade when price has moved significantly in last 300s"
+            # Comment was misleading — it said "reject if outside" but code does the opposite
         ],
         
         min_conditions_satisfied=2,

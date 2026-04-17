@@ -85,6 +85,14 @@ class StrategyOptimizer:
             "min_conditions_satisfied":     {"min": 2,    "max": 5,     "step": 1,     "default": 2,   "type": "int"},
             "min_score_threshold":          {"min": 1.0,  "max": 6.0,   "step": 0.25,  "default": 2.5},
             "base_position_pct":            {"min": 0.02, "max": 0.20,  "step": 0.01,  "default": 0.10},
+            # CRITICAL: Regime-specific multipliers (optimizer-controlled)
+            # These allow different risk parameters for different market conditions
+            "sl_mult_high_vol":             {"min": 0.5,  "max": 10.0, "step": 0.1,   "default": 3.5},
+            "sl_mult_low_vol":              {"min": 0.5,  "max": 10.0, "step": 0.1,   "default": 1.8},
+            "sl_mult_trending":             {"min": 0.5,  "max": 10.0, "step": 0.1,   "default": 2.5},
+            "tp_mult_high_vol":             {"min": 1.0,  "max": 20.0, "step": 0.1,   "default": 7.0},
+            "tp_mult_low_vol":              {"min": 1.0,  "max": 20.0, "step": 0.1,   "default": 2.5},
+            "tp_mult_trending":             {"min": 1.0,  "max": 20.0, "step": 0.1,   "default": 5.0},
         }  # [FIXED] Realistic bounds to prevent degenerate strategies and reduce optimization time
         
         strategy_params = {
@@ -270,15 +278,22 @@ class StrategyOptimizer:
         Clamp parameters to prevent numerical crashes ONLY.
         CRITICAL: Never call trial.suggest_*() here - that creates duplicate parameters.
         """
-        # Prevent ATR math crashes (keep within float-safe bounds)
-        params["stop_loss_atr_mult"] = max(0.5, min(20.0, params.get("stop_loss_atr_mult", 2.5)))
-        params["take_profit_atr_mult"] = max(1.0, min(50.0, params.get("take_profit_atr_mult", 6.0)))
-        
         # Prevent filter degeneracy (rejecting all signals or accepting all)
         params["abs__filter_spread_max"] = max(1.0, min(100.0, params.get("abs__filter_spread_max", 15.0)))
         params["abs__filter_bid_min"] = max(10.0, min(100000.0, params.get("abs__filter_bid_min", 1500.0)))
         params["abs__filter_ask_min"] = max(10.0, min(100000.0, params.get("abs__filter_ask_min", 1500.0)))
         params["abs__filter_chg300_range"] = max(0.003, min(0.10, params.get("abs__filter_chg300_range", 0.005)))
+        
+        # Enforce minimum risk/reward ratio for regime-specific multipliers
+        regimes = ["high_vol", "low_vol", "trending"]
+        for regime in regimes:
+            sl_key = f"sl_mult_{regime}"
+            tp_key = f"tp_mult_{regime}"
+            if sl_key in params and tp_key in params:
+                # Ensure at least 1.2:1 reward-to-risk ratio
+                min_tp = params[sl_key] * 1.2
+                if params[tp_key] < min_tp:
+                    params[tp_key] = min_tp
         
         return params  # [APPLIED]
 

@@ -435,7 +435,7 @@ class BacktestEngine:
                         self.equity_curve.append((timestamp, self._calculate_equity_fast()))
                     continue
 
-                signal = strategy.evaluate(state)
+                signal = strategy.evaluate(state, optimized_params=params)
 
                 if signal and signal.is_actionable:
                     if self._is_duplicate_signal(signal, strategy, timestamp):

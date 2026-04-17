@@ -225,6 +225,12 @@ class StrategyOptimizer:
             # Step 2: Enforce constraints (clamping only, no re-suggestion)
             params = self._enforce_constraints(params)
             
+            # === DIAGNOSTIC: Log a sample of params being sent to backtest ===
+            if trial.number % 10 == 0:  # Log every 10th trial to avoid spam
+                sample_params = {k: v for k, v in params.items() if k.startswith('abs__') or k.startswith('sl_mult') or k.startswith('tp_mult')}
+                logger.info(f"[objective] Trial {trial.number} sending to backtest: {sample_params}")
+            # === END DIAGNOSTIC ===
+            
             # DEBUG: Log final params being used
             logger.debug(f"[objective] Trial {trial.number} final params: {params}")
             

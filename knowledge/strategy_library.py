@@ -116,12 +116,21 @@ class StrategyDefinition:
     max_position_pct: float = 0.25
     scale_with_score: bool = True
     
-    def evaluate(self, state: OrderFlowState) -> Optional[Signal]:
+    def evaluate(
+        self, 
+        state: OrderFlowState, 
+        optimized_params: Optional[Dict[str, Any]] = None
+    ) -> Optional[Signal]:
         """
         Evaluate strategy conditions and return signal if triggered.
         CRITICAL: Uses regime-specific multipliers controlled by optimizer.
         """
         features = state.features
+        
+        # === CRITICAL FIX: Inject optimized params into conditions BEFORE evaluation ===
+        if optimized_params:
+            self._inject_optimized_params(optimized_params)
+        # === END FIX ===
         
         # DEBUG: Log regime check
         logger.debug(f"[{self.name}] Evaluating - Regime: {state.regime}, Features: {len(features)}")
@@ -278,6 +287,62 @@ class StrategyDefinition:
             return SignalType.STRONG_SELL if score > self.min_score_threshold * 1.5 else SignalType.SELL
         
     
+    def _inject_optimized_params(self, params: Dict[str, Any]) -> None:
+        """
+        Update condition thresholds from optimized parameters.
+        
+        Handles:
+        - Single-threshold conditions (operator: >, <, >=, <=, ==)
+        - Symmetric 'between' conditions (e.g., POC range, price change range)
+        - Regime-specific multipliers (sl_mult_*, tp_mult_*)
+        """
+        injected_count = 0
+        
+        # Inject into entry conditions and filters
+        for condition in self.entry_conditions + self.filters:
+            if condition.param_key and condition.param_key in params:
+                # Handle symmetric 'between' operator (e.g., abs__entry_poc_range)
+                if condition.operator == "between" and condition.param_key.endswith("_range"):
+                    # Param value represents half-width of symmetric range
+                    range_val = params[condition.param_key]
+                    condition.threshold = -range_val
+                    condition.threshold_high = range_val
+                    logger.debug(f"[{self.name}] Injected symmetric range: {condition.param_key} → [{-range_val}, {range_val}]")
+                else:
+                    # Standard single-threshold injection
+                    condition.threshold = params[condition.param_key]
+                    logger.debug(f"[{self.name}] Injected: {condition.param_key} → {condition.threshold}")
+                injected_count += 1
+        
+        # Inject regime-specific multipliers directly into strategy attributes
+        regimes = ["high_vol", "low_vol", "trending"]
+        for regime in regimes:
+            sl_key = f"sl_mult_{regime}"
+            tp_key = f"tp_mult_{regime}"
+            if sl_key in params:
+                setattr(self, sl_key, params[sl_key])
+                injected_count += 1
+                logger.debug(f"[{self.name}] Injected {sl_key} → {params[sl_key]}")
+            if tp_key in params:
+                setattr(self, tp_key, params[tp_key])
+                injected_count += 1
+                logger.debug(f"[{self.name}] Injected {tp_key} → {params[tp_key]}")
+        
+        # Inject other direct strategy attributes
+        direct_attrs = [
+            "trailing_stop_activation_pct", 
+            "min_conditions_satisfied", 
+            "min_score_threshold", 
+            "base_position_pct"
+        ]
+        for attr in direct_attrs:
+            if attr in params:
+                setattr(self, attr, params[attr])
+                injected_count += 1
+                logger.debug(f"[{self.name}] Injected {attr} → {params[attr]}")
+        
+        logger.info(f"[{self.name}] Param injection complete: {injected_count} values updated")
+
     def _estimate_atr(self, state: OrderFlowState, default: float = 100.0) -> float:
         """Estimate ATR for stop/TP placement.
         
@@ -373,7 +438,7 @@ def create_absorption_strategy() -> StrategyDefinition:
                 weight=1.5,       # High weight — strongly preferred but not required
                 required=False,   # NOT required: early absorption entries lag trade flow
                                   # Making it required would filter out the best entries
-                param_key="abs__entry_agreement"   # Exposed to optimizer  # [FIXED]
+                # param_key removed: not exposed to optimizer
             ),
         ],
         

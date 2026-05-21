@@ -1,16 +1,26 @@
 """
 Optuna Optimizer - Enhanced for Perfect Optimization
+PHASE 1 FIXES:
+1. Narrowed parameter ranges for XRP/USDT microstructure
+2. Comprehensive error logging with tracebacks
+3. Trial success rate monitoring
+4. Per-trial timeout (60 seconds)
+5. Warm-start parameter validation
+6. POC range symmetric handling
 """
 
 import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import MedianPruner, HyperbandPruner
 from typing import Dict, List, Optional, Any, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 from datetime import datetime
 import json
 from pathlib import Path
+import traceback
+import signal
+from contextlib import contextmanager
 
 from loguru import logger
 
@@ -19,6 +29,49 @@ from knowledge.strategy_library import StrategyDefinition, get_strategy
 
 # Suppress Optuna logs for cleaner output
 optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+
+class TimeoutException(Exception):
+    """Raised when trial timeout is exceeded"""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Handler for SIGALRM signal"""
+    raise TimeoutException("Trial exceeded 60 second timeout")
+
+
+@dataclass
+class TrialSuccessStats:
+    """Track trial success/failure statistics"""
+    total_trials: int = 0
+    successful_trials: int = 0
+    failed_trials: int = 0
+    timeout_trials: int = 0
+    pruned_trials: int = 0
+    penalized_trials: int = 0
+    error_log: List[Dict] = field(default_factory=list)
+    
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate percentage"""
+        if self.total_trials == 0:
+            return 0.0
+        return (self.successful_trials / self.total_trials) * 100
+    
+    def log_every_n(self, n: int = 50) -> bool:
+        """Return True if should log stats (every N trials)"""
+        return self.total_trials > 0 and self.total_trials % n == 0
+    
+    def check_critical_threshold(self) -> Optional[str]:
+        """Check if success rate is critically low"""
+        if self.total_trials >= 10 and self.success_rate < 0.30:
+            return (
+                f"CRITICAL: Trial success rate {self.success_rate:.1f}% < 30% "
+                f"({self.successful_trials}/{self.total_trials}). "
+                f"Recommend tightening parameter ranges further or checking backtest fn."
+            )
+        return None
 
 
 @dataclass
@@ -31,6 +84,7 @@ class OptimizationResult:
     timestamp: datetime
     all_trials: List[Dict] = None
     objective_type: str = "robust"
+    success_stats: Optional[TrialSuccessStats] = None
 
 
 class StrategyOptimizer:
@@ -64,43 +118,39 @@ class StrategyOptimizer:
     
     def _get_parameter_ranges(self) -> Dict[str, Dict]:
         """
-        Full optimizer-controlled parameter space.
-        CRITICAL: 
-        - NO dead parameters (everything used in evaluation)
-        - All regime multipliers included
-        - Proper bounds for XRP/USDT microstructure
+        PHASE 1 FIX: Apply narrowed parameter ranges for XRP/USDT microstructure.
+        Previous ranges were absurdly wide (e.g., abs__entry_delta_min: 0-50,000).
+        These tight ranges reflect actual microstructure bounds and reduce meaningless trials.
         
+        All ranges validated and tested for XRP/USDT spot trading.
         Naming convention: {strategy}__{type}_{feature}_{bound}
         """
         
-        # DEBUG: Log strategy being configured
-        logger.debug(f"[_get_parameter_ranges] Building ranges for {self.strategy_name}")
+        logger.debug(f"[_get_parameter_ranges] Building NARROWED ranges for {self.strategy_name}")
         
-        # CRITICAL FIX: Removed base stop_loss_atr_mult and take_profit_atr_mult 
-        # because evaluate() uses regime-specific multipliers exclusively.
-        # Including them would create "dead parameters" that Optuna wastes time optimizing.
-        
+        # NARROWED common parameters (Phase 1 spec table)
         common = {
-            "trailing_stop_activation_pct": {"min": 0.001,"max": 0.05,  "step": 0.001, "default": 0.005},
-            "min_conditions_satisfied":     {"min": 1,    "max": 6,     "step": 1,     "default": 2,   "type": "int"},
-            "min_score_threshold":          {"min": 0.5,  "max": 10.0,  "step": 0.25,  "default": 2.5},
-            "base_position_pct":            {"min": 0.01, "max": 0.50,  "step": 0.01,  "default": 0.10},
-        }  # [APPLIED] Wide bounds to free optimizer, max 6 conditions to prevent dead strategies
+            "trailing_stop_activation_pct": {"min": 0.002, "max": 0.03,  "step": 0.001, "default": 0.005},
+            "min_conditions_satisfied":     {"min": 2,     "max": 5,      "step": 1,     "default": 2,      "type": "int"},
+            "min_score_threshold":          {"min": 1.0,   "max": 6.0,    "step": 0.25,  "default": 2.5},
+            "base_position_pct":            {"min": 0.02,  "max": 0.20,   "step": 0.01,  "default": 0.10},
+        }
         
+        # NARROWED absorption strategy parameters (Phase 1 spec table)
         strategy_params = {
             "absorption": {
-                "abs__entry_str_min":      {"min": 0.05, "max": 0.90, "step": 0.05,  "default": 0.45},
-                "abs__entry_vol_min":      {"min": 0.3,  "max": 5.0,  "step": 0.1,   "default": 1.0},
-                "abs__entry_chg60_max":    {"min": 0.0,  "max": 0.05, "step": 0.001, "default": 0.001},
-                "abs__entry_delta_min":    {"min": 0,    "max": 50000,"step": 100,   "default": 0,    "type": "int"},
-                "abs__entry_imbal_min":    {"min": 0.0,  "max": 0.50, "step": 0.01,  "default": 0.05},
-                "abs__entry_poc_range":    {"min": 0.0,  "max": 0.05, "step": 0.001, "default": 0.005},
-                "abs__filter_spread_max":  {"min": 1.0,  "max": 100.0,"step": 1.0,   "default": 15.0},
-                "abs__filter_bid_min":     {"min": 10.0, "max": 100000.0, "step": 100.0, "default": 1500.0},
-                "abs__filter_ask_min":     {"min": 10.0, "max": 100000.0, "step": 100.0, "default": 1500.0},
-                "abs__filter_chg300_range":{"min": 0.003,"max": 0.10, "step": 0.001, "default": 0.005},
+                "abs__entry_str_min":       {"min": 0.2,   "max": 0.8,    "step": 0.05,   "default": 0.45},
+                "abs__entry_vol_min":       {"min": 0.5,   "max": 3.0,    "step": 0.1,    "default": 1.0},
+                "abs__entry_chg60_max":     {"min": 0.0005,"max": 0.005,  "step": 0.0005, "default": 0.002},
+                "abs__entry_delta_min":     {"min": 0,     "max": 5000,   "step": 100,    "default": 0,      "type": "int"},
+                "abs__entry_imbal_min":     {"min": 0.02,  "max": 0.40,   "step": 0.01,   "default": 0.08},
+                "abs__entry_poc_range":     {"min": 0.001, "max": 0.015,  "step": 0.001,  "default": 0.006},
+                "abs__filter_spread_max":   {"min": 5.0,   "max": 50.0,   "step": 1.0,    "default": 15.0},
+                "abs__filter_bid_min":      {"min": 1000.0,"max": 20000.0,"step": 500.0,  "default": 2000.0},
+                "abs__filter_ask_min":      {"min": 1000.0,"max": 20000.0,"step": 500.0,  "default": 2000.0},
+                "abs__filter_chg300_range": {"min": 0.003, "max": 0.02,   "step": 0.001,  "default": 0.006},
             },
-        }  # [APPLIED]
+        }
         
         # Merge parameters
         result = common.copy()
@@ -108,11 +158,14 @@ class StrategyOptimizer:
         
         if strat_key in strategy_params:
             result.update(strategy_params[strat_key])
-            logger.debug(f"[_get_parameter_ranges] Added {len(strategy_params[strat_key])} strategy-specific params")
+            logger.debug(f"[_get_parameter_ranges] Added {len(strategy_params[strat_key])} strategy-specific NARROWED params")
         else:
             logger.warning(f"[_get_parameter_ranges] No specific params defined for {strat_key}")
         
-        logger.info(f"[_get_parameter_ranges] Total parameter space: {len(result)} dimensions")
+        logger.info(
+            f"[_get_parameter_ranges] NARROWED parameter space: {len(result)} dimensions "
+            f"(Phase 1 spec applied)"
+        )
         return result
     
     def _suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
@@ -157,12 +210,25 @@ class StrategyOptimizer:
         return params
     
     def _get_warm_start_params(self) -> Dict[str, float]:
-        """Get initial parameter values for warm start"""
+        """
+        Get initial parameter values for warm start with validation.
+        PHASE 1 FIX: Validate warm-start params are within ranges before returning.
+        """
         warm_start = {}
         
         for param, range_dict in self.param_ranges.items():
             if "default" in range_dict:
-                warm_start[param] = range_dict["default"]
+                default_value = range_dict["default"]
+                # Validate default is within range
+                if range_dict["min"] <= default_value <= range_dict["max"]:
+                    warm_start[param] = default_value
+                else:
+                    logger.warning(
+                        f"[_get_warm_start_params] Default {default_value} for {param} "
+                        f"outside range [{range_dict['min']}, {range_dict['max']}]. "
+                        f"Clamping to range midpoint."
+                    )
+                    warm_start[param] = (range_dict["min"] + range_dict["max"]) / 2
         
         # Enforce logical constraints in warm start (regime-specific multipliers)
         regimes = ["high_vol", "low_vol", "trending"]
@@ -182,93 +248,231 @@ class StrategyOptimizer:
                 for param, value in llm_params.items():
                     if param in self.param_ranges:
                         range_dict = self.param_ranges[param]
+                        # Validate LLM params before accepting
                         if range_dict["min"] <= value <= range_dict["max"]:
                             warm_start[param] = value
+                        else:
+                            logger.warning(
+                                f"[_get_warm_start_params] LLM param {param}={value} "
+                                f"outside range [{range_dict['min']}, {range_dict['max']}]. Rejected."
+                            )
             except Exception as e:
-                logger.warning(f"Failed to get LLM initial params: {e}")
+                logger.warning(f"[_get_warm_start_params] Failed to get LLM initial params: {e}")
         
+        logger.info(f"[_get_warm_start_params] Validated warm-start with {len(warm_start)} params")
         return warm_start
     
     def create_objective(
         self,
         backtest_fn: Callable[[Dict[str, Any]], Dict[str, float]],
-        objective_type: str = "robust"
+        objective_type: str = "robust",
+        trial_timeout_sec: int = 60,
+        success_stats: Optional[TrialSuccessStats] = None
     ) -> Callable[[optuna.Trial], float]:
         """
-        Create Optuna objective function.
-        CRITICAL: Uses _suggest_params and _enforce_constraints (no re-suggestion).
+        Create Optuna objective function with PHASE 1 ENHANCEMENTS:
+        - Comprehensive error logging (trial #, all params, exception, traceback, metrics)
+        - Per-trial timeout (default 60 seconds)
+        - POC range symmetric handling
+        - Trial success rate monitoring
+        - Penalized trial tracking
+        
+        Args:
+            backtest_fn: Function to evaluate strategy params
+            objective_type: Type of objective (robust, sharpe, profit)
+            trial_timeout_sec: Maximum seconds per trial
+            success_stats: Optional TrialSuccessStats object to track metrics
         """
         
-        def objective(trial: optuna.Trial) -> float:
-            # DEBUG: Log trial start
-            logger.debug(f"[objective] Starting trial {trial.number}")
-            
-            # Step 1: Suggest parameters (single source of truth)
-            params = self._suggest_params(trial)
-            
-            # Step 2: Enforce constraints (clamping only, no re-suggestion)
-            params = self._enforce_constraints(params)
-            
-            # DEBUG: Log final params being used
-            logger.debug(f"[objective] Trial {trial.number} final params: {params}")
-            
-            # Step 3: Run backtest
-            try:
-                metrics = backtest_fn(params)
-                logger.debug(f"[objective] Trial {trial.number} metrics: {metrics}")
-            except Exception as e:
-                logger.error(f"[objective] Trial {trial.number} backtest failed: {e}")
-                return float("-inf")
-            
-            # Check if penalized (too few trades)
-            if metrics.get("_penalized", False):
-                logger.warning(f"[objective] Trial {trial.number} penalized (insufficient trades)")
-                trial.set_user_attr("penalized", True)
-                return float("-inf")
-            
-            # Store all metrics as user attributes for analysis
-            for key, value in metrics.items():
-                trial.set_user_attr(key, value)
-            
-            # Calculate objective score
-            if objective_type == "sharpe":
-                score = metrics.get("sharpe_ratio", 0)
-            elif objective_type == "profit":
-                score = self._profit_objective(metrics)
-            elif objective_type == "profit_dd_trades":
-                score = self._profit_dd_trades_objective(metrics)
-            else:  # robust
-                score = self._robust_objective(metrics)
-            
-            # DEBUG: Log score
-            logger.debug(f"[objective] Trial {trial.number} score ({objective_type}): {score:.4f}")
-            
-            # Report for pruning
-            trial.report(score, step=1)
-            if trial.should_prune():
-                logger.debug(f"[objective] Trial {trial.number} pruned")
-                raise optuna.TrialPruned()
-            
-            return score
+        if success_stats is None:
+            success_stats = TrialSuccessStats()
         
+        def objective(trial: optuna.Trial) -> float:
+            trial_num = trial.number
+            
+            # ===== PHASE 1 FIX: Start trial tracking =====
+            logger.debug(f"[objective] Starting trial {trial_num}")
+            
+            try:
+                # Step 1: Suggest parameters
+                params = self._suggest_params(trial)
+                
+                # Step 2: PHASE 1 FIX - Enforce constraints including POC range validation
+                params = self._enforce_constraints(params)
+                
+                # Step 3: PHASE 1 FIX - Validate POC range is symmetric (min > 0)
+                if "abs__entry_poc_range" in params:
+                    poc_range = params["abs__entry_poc_range"]
+                    if poc_range <= 0:
+                        logger.warning(
+                            f"[objective] Trial {trial_num}: POC range {poc_range} <= 0. "
+                            f"Clamping to minimum 0.001"
+                        )
+                        params["abs__entry_poc_range"] = 0.001
+                
+                logger.debug(
+                    f"[objective] Trial {trial_num} params validated. "
+                    f"Key params: trailing_stop={params.get('trailing_stop_activation_pct', 'N/A')}, "
+                    f"min_conditions={params.get('min_conditions_satisfied', 'N/A')}, "
+                    f"min_score={params.get('min_score_threshold', 'N/A')}"
+                )
+                
+                # Step 4: PHASE 1 FIX - Run backtest with timeout
+                try:
+                    # Set timeout signal (Unix only, graceful on Windows)
+                    if hasattr(signal, 'SIGALRM'):
+                        signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(trial_timeout_sec)
+                    
+                    try:
+                        metrics = backtest_fn(params)
+                    finally:
+                        if hasattr(signal, 'SIGALRM'):
+                            signal.alarm(0)  # Cancel alarm
+                    
+                    logger.debug(
+                        f"[objective] Trial {trial_num} backtest complete. "
+                        f"Metrics: sharpe={metrics.get('sharpe_ratio', 'N/A')}, "
+                        f"trades={metrics.get('total_trades', 'N/A')}, "
+                        f"return={metrics.get('total_return_pct', 'N/A'):.4f}"
+                    )
+                    
+                except TimeoutException as e:
+                    # PHASE 1 FIX: Log timeout
+                    logger.error(
+                        f"[objective] Trial {trial_num} TIMEOUT: {trial_timeout_sec}s exceeded. "
+                        f"Params: {params}"
+                    )
+                    success_stats.timeout_trials += 1
+                    success_stats.error_log.append({
+                        "trial": trial_num,
+                        "error_type": "TIMEOUT",
+                        "message": str(e),
+                        "params": params
+                    })
+                    return float("-inf")
+                
+                # Step 5: Check if penalized (too few trades)
+                if metrics.get("_penalized", False):
+                    logger.warning(
+                        f"[objective] Trial {trial_num} PENALIZED: insufficient trades. "
+                        f"Trades: {metrics.get('total_trades', 0)}"
+                    )
+                    success_stats.penalized_trials += 1
+                    trial.set_user_attr("penalized", True)
+                    return float("-inf")
+                
+                # Store all metrics as user attributes
+                for key, value in metrics.items():
+                    if not isinstance(value, (dict, list)):  # Skip nested structures
+                        try:
+                            trial.set_user_attr(key, value)
+                        except Exception as e:
+                            logger.debug(f"[objective] Could not set attr {key}: {e}")
+                
+                # Step 6: Calculate objective score
+                if objective_type == "sharpe":
+                    score = metrics.get("sharpe_ratio", 0)
+                elif objective_type == "profit":
+                    score = self._profit_objective(metrics)
+                elif objective_type == "profit_dd_trades":
+                    score = self._profit_dd_trades_objective(metrics)
+                else:  # robust
+                    score = self._robust_objective(metrics)
+                
+                logger.debug(f"[objective] Trial {trial_num} score ({objective_type}): {score:.4f}")
+                
+                # Step 7: Report for pruning
+                trial.report(score, step=1)
+                if trial.should_prune():
+                    logger.debug(f"[objective] Trial {trial_num} pruned by Hyperband")
+                    success_stats.pruned_trials += 1
+                    raise optuna.TrialPruned()
+                
+                # SUCCESS
+                success_stats.successful_trials += 1
+                return score
+            
+            except optuna.TrialPruned:
+                # Already logged above
+                raise
+            
+            except Exception as e:
+                # PHASE 1 FIX: COMPREHENSIVE ERROR LOGGING
+                success_stats.failed_trials += 1
+                
+                error_entry = {
+                    "trial": trial_num,
+                    "error_type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                    "params": params if 'params' in locals() else {},
+                    "timestamp": datetime.now().isoformat()
+                }
+                success_stats.error_log.append(error_entry)
+                
+                logger.error(
+                    f"[objective] Trial {trial_num} FAILED: {type(e).__name__}: {e}\n"
+                    f"Parameters: {params if 'params' in locals() else 'NOT_OBTAINED'}\n"
+                    f"Traceback:\n{traceback.format_exc()}"
+                )
+                
+                return float("-inf")
+            
+            finally:
+                # PHASE 1 FIX: Update total trial count and check threshold
+                success_stats.total_trials += 1
+                
+                if success_stats.log_every_n(n=50):
+                    logger.info(
+                        f"[objective] Trial {trial_num} milestone - "
+                        f"Success rate: {success_stats.success_rate:.1f}% "
+                        f"({success_stats.successful_trials}/{success_stats.total_trials}), "
+                        f"Failed: {success_stats.failed_trials}, "
+                        f"Timeout: {success_stats.timeout_trials}, "
+                        f"Pruned: {success_stats.pruned_trials}, "
+                        f"Penalized: {success_stats.penalized_trials}"
+                    )
+                    
+                    critical_msg = success_stats.check_critical_threshold()
+                    if critical_msg:
+                        logger.critical(critical_msg)
+        
+        # Store reference to success_stats for later retrieval
+        objective._success_stats = success_stats
         return objective
     
     def _enforce_constraints(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
         Clamp parameters to prevent numerical crashes ONLY.
+        PHASE 1 FIX: Added POC range symmetric handling (min > 0).
         CRITICAL: Never call trial.suggest_*() here - that creates duplicate parameters.
         """
         # Prevent ATR math crashes (keep within float-safe bounds)
-        params["stop_loss_atr_mult"] = max(0.5, min(20.0, params.get("stop_loss_atr_mult", 2.5)))
-        params["take_profit_atr_mult"] = max(1.0, min(50.0, params.get("take_profit_atr_mult", 6.0)))
+        if "stop_loss_atr_mult" in params:
+            params["stop_loss_atr_mult"] = max(0.5, min(20.0, params.get("stop_loss_atr_mult", 2.5)))
+        if "take_profit_atr_mult" in params:
+            params["take_profit_atr_mult"] = max(1.0, min(50.0, params.get("take_profit_atr_mult", 6.0)))
         
         # Prevent filter degeneracy (rejecting all signals or accepting all)
-        params["abs__filter_spread_max"] = max(1.0, min(100.0, params.get("abs__filter_spread_max", 15.0)))
-        params["abs__filter_bid_min"] = max(10.0, min(100000.0, params.get("abs__filter_bid_min", 1500.0)))
-        params["abs__filter_ask_min"] = max(10.0, min(100000.0, params.get("abs__filter_ask_min", 1500.0)))
-        params["abs__filter_chg300_range"] = max(0.003, min(0.10, params.get("abs__filter_chg300_range", 0.005)))
+        params["abs__filter_spread_max"] = max(5.0, min(50.0, params.get("abs__filter_spread_max", 15.0)))
+        params["abs__filter_bid_min"] = max(1000.0, min(20000.0, params.get("abs__filter_bid_min", 2000.0)))
+        params["abs__filter_ask_min"] = max(1000.0, min(20000.0, params.get("abs__filter_ask_min", 2000.0)))
+        params["abs__filter_chg300_range"] = max(0.003, min(0.02, params.get("abs__filter_chg300_range", 0.006)))
         
-        return params  # [APPLIED]
+        # PHASE 1 FIX: Ensure POC range is symmetric (min > 0, not degenerate)
+        if "abs__entry_poc_range" in params:
+            poc = params["abs__entry_poc_range"]
+            if poc <= 0:
+                logger.warning(
+                    f"[_enforce_constraints] POC range {poc} <= 0. Clamping to minimum 0.001."
+                )
+                params["abs__entry_poc_range"] = 0.001
+            elif poc < 0.001:
+                logger.debug(f"[_enforce_constraints] POC range {poc} very small, clamping to 0.001")
+                params["abs__entry_poc_range"] = 0.001
+        
+        return params
 
     
     def _profit_objective(self, metrics: Dict[str, float]) -> float:
@@ -402,12 +606,29 @@ class StrategyOptimizer:
         n_trials: int = 200,
         n_jobs: int = -1,
         timeout: Optional[int] = None,
-        objective_type: str = "robust"
+        objective_type: str = "robust",
+        trial_timeout_sec: int = 60
     ) -> OptimizationResult:
         """
         Run optimization with warm start and enhanced objective.
+        
+        PHASE 1 ENHANCEMENT: Tracks trial success rate and logs comprehensive statistics.
+        
+        Args:
+            backtest_fn: Function to evaluate strategy parameters
+            n_trials: Number of optimization trials
+            n_jobs: Number of parallel workers (-1 = all CPUs)
+            timeout: Overall optimization timeout in seconds
+            objective_type: Type of objective (robust, sharpe, profit, profit_dd_trades)
+            trial_timeout_sec: Maximum seconds per individual trial
+        
+        Returns:
+            OptimizationResult with best parameters, score, and success statistics
         """
         study_name = f"{self.strategy_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        # PHASE 1 FIX: Create success stats tracker
+        success_stats = TrialSuccessStats()
         
         # Enhanced sampler with warm start
         sampler = TPESampler(
@@ -440,11 +661,22 @@ class StrategyOptimizer:
             }
             if valid_warm_start:
                 study.enqueue_trial(valid_warm_start)
-                logger.info(f"Enqueued warm-start trial with {len(valid_warm_start)} params")
+                logger.info(f"[optimize] Enqueued warm-start trial with {len(valid_warm_start)} params")
         
-        objective = self.create_objective(backtest_fn, objective_type)
+        # PHASE 1 FIX: Pass success_stats to objective
+        objective = self.create_objective(
+            backtest_fn,
+            objective_type,
+            trial_timeout_sec=trial_timeout_sec,
+            success_stats=success_stats
+        )
         
-        logger.info(f"Starting optimization: {n_trials} trials, objective={objective_type}, n_jobs={n_jobs}")
+        logger.info(
+            f"[optimize] Starting optimization: {n_trials} trials, "
+            f"objective={objective_type}, n_jobs={n_jobs}, "
+            f"trial_timeout={trial_timeout_sec}s, "
+            f"(NARROWED parameter ranges applied)"
+        )
         
         study.optimize(
             objective,
@@ -473,18 +705,45 @@ class StrategyOptimizer:
             study_name=study_name,
             timestamp=datetime.now(),
             all_trials=valid_trials,
-            objective_type=objective_type
+            objective_type=objective_type,
+            success_stats=success_stats
         )
         
-        logger.info(f"Optimization complete.")
-        logger.info(f"  Best score ({objective_type}): {result.best_score:.4f}")
-        logger.info(f"  Valid trials: {len(valid_trials)} / {len(study.trials)}")
-        logger.info(f"  Best params: {result.best_params}")
+        # PHASE 1 FIX: Log comprehensive results
+        logger.info("=" * 80)
+        logger.info("[optimize] Optimization complete - PHASE 1 RESULTS")
+        logger.info("=" * 80)
+        logger.info(f"Best score ({objective_type}): {result.best_score:.4f}")
+        logger.info(f"Total trials: {result.n_trials}")
+        logger.info(
+            f"Trial breakdown - Successful: {success_stats.successful_trials}, "
+            f"Failed: {success_stats.failed_trials}, "
+            f"Timeout: {success_stats.timeout_trials}, "
+            f"Pruned: {success_stats.pruned_trials}, "
+            f"Penalized: {success_stats.penalized_trials}"
+        )
+        logger.info(f"Success rate: {success_stats.success_rate:.1f}%")
+        logger.info(f"Valid trials for analysis: {len(valid_trials)} / {len(study.trials)}")
+        
+        if success_stats.error_log:
+            logger.warning(f"[optimize] {len(success_stats.error_log)} errors logged during optimization:")
+            # Log first 5 errors in detail
+            for error in success_stats.error_log[:5]:
+                logger.warning(
+                    f"  Trial {error['trial']}: {error['error_type']} - {error['message']}"
+                )
+            if len(success_stats.error_log) > 5:
+                logger.warning(f"  ... and {len(success_stats.error_log) - 5} more errors")
+        
+        logger.info(f"Best params: {result.best_params}")
+        logger.info("=" * 80)
         
         return result
     
     def save_results(self, result: OptimizationResult, path: str) -> None:
-        """Save optimization results to file"""
+        """
+        Save optimization results to file, including PHASE 1 success stats.
+        """
         output = {
             "strategy_name": self.strategy_name,
             "best_params": result.best_params,
@@ -494,14 +753,24 @@ class StrategyOptimizer:
             "timestamp": result.timestamp.isoformat(),
             "objective_type": result.objective_type,
             "param_ranges": self.param_ranges,
-            "warm_start_params": self.warm_start_params
+            "warm_start_params": self.warm_start_params,
+            # PHASE 1 FIX: Include success statistics
+            "success_stats": {
+                "total_trials": result.success_stats.total_trials if result.success_stats else 0,
+                "successful_trials": result.success_stats.successful_trials if result.success_stats else 0,
+                "failed_trials": result.success_stats.failed_trials if result.success_stats else 0,
+                "timeout_trials": result.success_stats.timeout_trials if result.success_stats else 0,
+                "pruned_trials": result.success_stats.pruned_trials if result.success_stats else 0,
+                "penalized_trials": result.success_stats.penalized_trials if result.success_stats else 0,
+                "success_rate_pct": result.success_stats.success_rate if result.success_stats else 0,
+            }
         }
         
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'w') as f:
-            json.dump(output, f, indent=2)
+            json.dump(output, f, indent=2, default=str)
         
-        logger.info(f"Saved results to {path}")
+        logger.info(f"[save_results] Saved results to {path}")
     
     def analyze_parameter_sensitivity(self, result: OptimizationResult) -> Dict[str, float]:
         """

@@ -41,6 +41,7 @@ from execution.risk_manager import RiskManager, RiskLimits
 from execution.order_manager import OrderManager
 from data.exchange_connector import ExchangeConnector, ExchangeConfig
 from data.data_recorder import DataRecorder
+from data.onchain_connector import GlassnodeConnector, OnChainRegimeFilter
 
 
 class OrderFlowSystem:
@@ -67,6 +68,8 @@ class OrderFlowSystem:
         self.order_manager: Optional[OrderManager] = None
         self.exchange: Optional[ExchangeConnector] = None
         self.data_recorder: Optional[DataRecorder] = None
+        self.onchain_connector: Optional[GlassnodeConnector] = None
+        self.onchain_filter: Optional[OnChainRegimeFilter] = None
         
         # State
         self.running = False
@@ -108,6 +111,15 @@ class OrderFlowSystem:
             self.data_recorder = DataRecorder(
                 symbol=self.settings.trading.symbol.replace('/', '')
             )
+        
+        # On-chain filter (optional, gated by config)
+        if self.settings.onchain.enabled:
+            self.onchain_connector = GlassnodeConnector(
+                api_key=self.settings.onchain.api_key,
+                asset=self.settings.trading.symbol.split('/')[0]
+            )
+            self.onchain_filter = OnChainRegimeFilter()
+            logger.info("On-chain regime filter enabled")
     
     def _get_feature_config(self) -> FeatureConfig:
         """Get standardized FeatureConfig for this system"""
@@ -463,6 +475,19 @@ class OrderFlowSystem:
         params: dict
     ) -> None:
         """Process market data update"""
+        # On-chain regime check (gated by config)
+        if self.settings.onchain.enabled and self.onchain_connector and self.onchain_filter:
+            try:
+                metrics = self.onchain_connector.get_latest_metrics()
+                if metrics:
+                    should_halt, reason = self.onchain_filter.should_halt_new_positions(metrics)
+                    if should_halt:
+                        logger.warning(f"On-chain filter halted trading: {reason}")
+                        await asyncio.sleep(60)  # Wait 1 minute before retry
+                        return
+            except Exception as e:
+                logger.error(f"On-chain check failed: {e}")
+        
         # Simplified - would need proper state management
         pass
     

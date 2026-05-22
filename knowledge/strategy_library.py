@@ -14,6 +14,14 @@ from core.data_structures import (
     OrderFlowState, Signal, SignalType, Side, Regime
 )
 
+# Optional ML ensemble import (graceful if not installed)
+try:
+    from prediction.ml_ensemble import MLEnsemble
+    _ML_AVAILABLE = True
+except ImportError:
+    MLEnsemble = None
+    _ML_AVAILABLE = False
+
 
 class StrategyCategory(Enum):
     ABSORPTION = auto()
@@ -111,6 +119,10 @@ class StrategyDefinition:
     filters: List[StrategyCondition] = field(default_factory=list)
     allowed_regimes: List[Regime] = field(default_factory=lambda: list(Regime))
     
+    # ML ensemble (optional, set externally)
+    ml_ensemble: Optional[object] = None
+    ml_min_confidence: float = 0.7
+
     # Position sizing
     base_position_pct: float = 0.1
     max_position_pct: float = 0.25
@@ -233,7 +245,41 @@ class StrategyDefinition:
                              self.max_position_pct)
         
         confidence = min(total_score / (self.min_score_threshold * 2), 1.0)
-        
+
+        # ML ensemble check (optional, only if model is assigned)
+        if self.ml_ensemble is not None and _ML_AVAILABLE:
+            try:
+                # Extract features from state for ML prediction
+                ml_features = self._extract_ml_features(state)
+                prediction = self.ml_ensemble.predict(
+                    ml_features,
+                    confidence_threshold=self.ml_min_confidence
+                )
+
+                # Check ML confidence threshold
+                if prediction.confidence < self.ml_min_confidence:
+                    logger.debug(
+                        f"[{self.name}] ML REJECTED: confidence {prediction.confidence:.2f} "
+                        f"< {self.ml_min_confidence:.2f}"
+                    )
+                    return None
+
+                # Check ML direction agrees with rule-based signal
+                ml_direction = "BUY" if direction in (SignalType.BUY, SignalType.STRONG_BUY) else "SELL"
+                if prediction.decision != ml_direction:
+                    logger.debug(
+                        f"[{self.name}] ML REJECTED: ML says {prediction.decision}, "
+                        f"rule says {ml_direction}"
+                    )
+                    return None
+
+                logger.debug(
+                    f"[{self.name}] ML APPROVED: {prediction.decision} @ "
+                    f"confidence={prediction.confidence:.2f}"
+                )
+            except Exception as e:
+                logger.warning(f"[{self.name}] ML ensemble error (proceeding without ML): {e}")
+
         # DEBUG: Log signal generation
         logger.info(f"[{self.name}] SIGNAL: {direction.name} @ {mid_price:.4f} | "
                    f"SL={stop_loss:.4f} TP={take_profit:.4f} | "
@@ -305,6 +351,56 @@ class StrategyDefinition:
 
         # Priority 3: Fallback — 0.5% of price
         return mid_price * 0.005
+
+    def _extract_ml_features(self, state: OrderFlowState) -> dict:
+        """
+        Extract features from OrderFlowState for ML ensemble prediction.
+        Converts FeatureEngine output into the format expected by ML models.
+
+        Returns a dict with numeric feature values.
+        """
+        features = state.features
+        if not features:
+            return {}
+
+        ml_features = {}
+
+        # Price-derived features
+        for key in ['mid_price', 'spread_bps', 'price_change_pct_60s',
+                     'price_change_pct_300s', 'price_range_60s', 'price_range_300s',
+                     'price_vs_vwap_pct', 'price_vs_poc_pct']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Volume features
+        for key in ['volume_acceleration', 'volume_30s', 'volume_60s',
+                     'volume_300s', 'trade_count_60s', 'trade_intensity_60s']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Delta / order flow
+        for key in ['delta_60s', 'delta_300s', 'abs_delta_60s', 'delta_pct_60s',
+                     'delta_pct_300s', 'cvd_60s', 'cvd_300s']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Depth / book features
+        for key in ['depth_imbalance_10', 'depth_imbalance_20',
+                     'bid_depth_10', 'ask_depth_10', 'net_pressure',
+                     'slope_asymmetry', 'book_trade_agreement']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Technical features
+        for key in ['atr_60s', 'atr_300s', 'exhaustion_score',
+                     'buying_exhaustion', 'selling_exhaustion',
+                     'in_value_area', 'va_breakout_potential',
+                     'footprint_imbalance_count', 'pressure_confirmed']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        logger.debug(f"[_extract_ml_features] Extracted {len(ml_features)} features")
+        return ml_features
 
 
 # ==================== PRE-DEFINED STRATEGIES ====================

@@ -12,6 +12,8 @@ import uuid
 
 from loguru import logger
 
+from core.fee_aware_filter import LiveFeeAwareFilter
+
 
 class OrderStatus(Enum):
     PENDING = auto()
@@ -94,6 +96,14 @@ class OrderManager:
         # Callbacks
         self.on_fill: Optional[Callable[[Fill], None]] = None
         self.on_order_update: Optional[Callable[[Order], None]] = None
+
+        # Fee-aware filter for live/paper trading
+        self.fee_filter = LiveFeeAwareFilter(
+            maker_fee_pct=0.001,
+            taker_fee_pct=0.001,
+            expected_spread_pct=0.0005,
+            min_profit_target_pct=0.001
+        )
     
     def create_market_order(
         self,
@@ -199,6 +209,45 @@ class OrderManager:
         
         return (entry_order, sl_order, tp_order)
     
+    def validate_signal_with_fee_filter(
+        self,
+        signal,
+        predicted_move_pct: float,
+        confidence: float,
+        current_bid: float,
+        current_ask: float,
+        last_price: float
+    ) -> dict:
+        """
+        Validate a signal through the fee-aware filter before order creation.
+
+        Args:
+            signal: Signal object from strategy evaluation
+            predicted_move_pct: Predicted price move as decimal
+            confidence: Signal confidence 0.0-1.0
+            current_bid: Current bid price
+            current_ask: Current ask price
+            last_price: Last traded price
+
+        Returns:
+            dict with 'status' ('APPROVED' or 'REJECTED') and 'reason'
+        """
+        should_trade, reason = self.fee_filter.should_trade_with_spread(
+            signal,
+            predicted_move_pct,
+            confidence,
+            current_bid,
+            current_ask,
+            last_price
+        )
+
+        if not should_trade:
+            logger.warning(f"[OrderManager] Fee filter REJECTED: {reason}")
+            return {'status': 'REJECTED', 'reason': reason}
+
+        logger.debug(f"[OrderManager] Fee filter APPROVED: {reason}")
+        return {'status': 'APPROVED', 'reason': reason}
+
     async def submit_order(self, order: Order) -> bool:
         """Submit order to exchange"""
         if not self.exchange:

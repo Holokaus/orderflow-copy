@@ -30,6 +30,7 @@ from core.data_structures import (
     OrderBook, PriceLevel, FootprintBar, Regime
 )
 from core.feature_engine import FeatureEngine, FeatureConfig
+from core.fee_aware_filter import FeeAwareFilter
 from knowledge.strategy_library import StrategyDefinition
 from execution.risk_manager import RiskManager, RiskLimits, RiskAction
 
@@ -110,6 +111,7 @@ class BacktestMetrics:
     signals_reduced_by_risk: int = 0
     halts_triggered: int = 0
     suspicious_pnl_rejected: int = 0
+    signals_rejected_by_fee_filter: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +190,14 @@ class BacktestEngine:
         # FIX: Store feature config for creating FeatureEngine
         self._feature_config = feature_config or FeatureConfig()
 
+        # Fee-aware filter
+        self.fee_filter = FeeAwareFilter(
+            maker_fee_pct=0.001,
+            taker_fee_pct=0.001,
+            expected_spread_pct=0.0005,
+            min_profit_target_pct=0.001
+        )
+
         self.risk_limits = risk_limits or RiskLimits(
             max_position_size=10000.0, #1.0 for BTC change to 10000 for XRP
             max_position_value_pct=0.25,
@@ -218,6 +228,7 @@ class BacktestEngine:
         self._signals_reduced = 0
         self._halts = 0
         self._suspicious_rejected = 0
+        self._signals_rejected_by_fee_filter = 0
 
     def reset(self) -> None:
         """Reset state for new backtest."""
@@ -241,6 +252,7 @@ class BacktestEngine:
         self._signals_reduced = 0
         self._halts = 0
         self._suspicious_rejected = 0
+        self._signals_rejected_by_fee_filter = 0
         self._entry_tick_idx: int = -1  # [FIXED] Track entry tick to prevent same-tick exits
         self._current_tick_idx: int = -1  # [FIXED] Track current tick for entry-tick guard
 
@@ -453,7 +465,22 @@ class BacktestEngine:
                     elif risk_action == RiskAction.REJECT:
                         self._signals_rejected += 1
                         continue
-                    elif risk_action == RiskAction.REDUCE_SIZE:
+
+                    # Fee-aware filter check (before opening position)
+                    signal_to_check = adjusted_signal or signal
+                    predicted_move_pct = self._estimate_predicted_move(state, strategy)
+                    if predicted_move_pct > 0:
+                        should_ignore, fee_reason = self.fee_filter.should_ignore_signal(
+                            signal_to_check, predicted_move_pct, signal_to_check.confidence
+                        )
+                        if should_ignore:
+                            self._signals_rejected_by_fee_filter += 1
+                            logger.info(f"Fee filter rejected signal: {fee_reason}")
+                            if tick_idx % equity_every == 0:
+                                self.equity_curve.append((timestamp, self._calculate_equity_fast()))
+                            continue
+
+                    if risk_action == RiskAction.REDUCE_SIZE:
                         self._signals_reduced += 1
                         self._open_position(adjusted_signal, state, timestamp, strategy, risk_action.name)
                         self._entry_tick_idx = tick_idx  # [FIXED] Record the tick we opened on
@@ -812,6 +839,42 @@ class BacktestEngine:
         return None
 
     # ------------------------------------------------------------------
+    # Fee filter helper
+    # ------------------------------------------------------------------
+
+    def _estimate_predicted_move(
+        self,
+        state: OrderFlowState,
+        strategy: StrategyDefinition,
+    ) -> float:
+        """
+        Estimate the predicted price move based on current ATR and take profit multiplier.
+        Used by fee-aware filter to determine if signal covers trading costs.
+
+        Returns:
+            Predicted move as decimal (0.01 = 1%), or 0.0 if not calculable
+        """
+        mid_price = state.order_book.mid_price
+        if mid_price <= 0:
+            return 0.0
+
+        atr = strategy._estimate_atr(state)
+        if atr <= 0:
+            return 0.0
+
+        # Use the regime-appropriate take profit multiplier
+        regime = state.regime
+        if regime == Regime.HIGH_VOLATILITY:
+            tp_mult = strategy.tp_mult_high_vol
+        elif regime in (Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION):
+            tp_mult = strategy.tp_mult_low_vol
+        else:
+            tp_mult = strategy.tp_mult_trending
+
+        predicted_move_pct = (atr * tp_mult) / mid_price
+        return predicted_move_pct
+
+    # ------------------------------------------------------------------
     # Open/Close position
     # ------------------------------------------------------------------
 
@@ -1087,6 +1150,7 @@ class BacktestEngine:
         metrics.signals_reduced_by_risk = self._signals_reduced
         metrics.halts_triggered = self._halts
         metrics.suspicious_pnl_rejected = self._suspicious_rejected
+        metrics.signals_rejected_by_fee_filter = self._signals_rejected_by_fee_filter
 
         return metrics
 

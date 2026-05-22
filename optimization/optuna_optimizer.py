@@ -19,8 +19,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import traceback
-import signal
-from contextlib import contextmanager
+import concurrent.futures
 
 from loguru import logger
 
@@ -34,11 +33,6 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 class TimeoutException(Exception):
     """Raised when trial timeout is exceeded"""
     pass
-
-
-def timeout_handler(signum, frame):
-    """Handler for SIGALRM signal"""
-    raise TimeoutException("Trial exceeded 60 second timeout")
 
 
 @dataclass
@@ -317,18 +311,14 @@ class StrategyOptimizer:
                     f"min_score={params.get('min_score_threshold', 'N/A')}"
                 )
                 
-                # Step 4: PHASE 1 FIX - Run backtest with timeout
+                # Step 4: PHASE 1 FIX - Run backtest with cross-platform timeout
                 try:
-                    # Set timeout signal (Unix only, graceful on Windows)
-                    if hasattr(signal, 'SIGALRM'):
-                        signal.signal(signal.SIGALRM, timeout_handler)
-                        signal.alarm(trial_timeout_sec)
-                    
-                    try:
-                        metrics = backtest_fn(params)
-                    finally:
-                        if hasattr(signal, 'SIGALRM'):
-                            signal.alarm(0)  # Cancel alarm
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(backtest_fn, params)
+                        try:
+                            metrics = future.result(timeout=trial_timeout_sec)
+                        except concurrent.futures.TimeoutError:
+                            raise TimeoutException(f"Trial exceeded {trial_timeout_sec} second timeout")
                     
                     logger.debug(
                         f"[objective] Trial {trial_num} backtest complete. "

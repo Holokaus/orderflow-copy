@@ -1,13 +1,15 @@
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 import json
 import gzip
 import time
 
 import pandas as pd
 from loguru import logger
+
+from data.fee_aware_data_filter import HistoricalDataFilter, FilterConfig as DataFilterConfig
 
 
 class DataRecorder:
@@ -283,6 +285,39 @@ class DataRecorder:
 
         logger.info(f"Loaded {len(df)} records from {start_date.date()} to {end_date.date()}")
         return df
+
+    def load_filtered_data(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        data_type: str = 'trades',
+        filter_config: Optional[DataFilterConfig] = None,
+    ) -> Tuple[pd.DataFrame, dict]:
+        """
+        Load recorded data and apply fee-aware filtering.
+        
+        Returns filtered DataFrame and filtering statistics.
+        """
+        df = self.load_recorded_data(start_date, end_date, data_type)
+        
+        if df.empty:
+            return df, {'original_size': 0, 'filtered_size': 0, 'retention_pct': 0}
+        
+        data_filter = HistoricalDataFilter(filter_config)
+        filtered_df, stats = data_filter.filter_ticks_with_stats(df)
+        
+        logger.info(
+            f"[load_filtered_data] Data filtering complete: "
+            f"{stats['retention_pct']:.1f}% retained"
+        )
+        
+        # Save filtered copy if configured
+        if filter_config and filter_config.save_filtered_copy:
+            output_path = self.output_dir / f"{self.symbol}_{data_type}_filtered.parquet"
+            filtered_df.to_parquet(output_path)
+            logger.info(f"[load_filtered_data] Saved filtered data to {output_path}")
+        
+        return filtered_df, stats
 
     def _read_file_auto(self, file_path: Path) -> List[Dict]:
         """Read data file, auto-detecting JSONL vs legacy JSON format."""

@@ -81,15 +81,19 @@ class RegimeClassifier:
         self,
         trade_history: List[Trade],
         book_features: Dict[str, float],
-        current_ts: datetime
+        current_ts: datetime,
+        timestamps_cache: Optional[List[datetime]] = None,
     ) -> Regime:
         """Classify market regime from price action + order flow features."""
         if len(trade_history) < 100:
             return Regime.UNKNOWN
         
-        # Get lookback window via binary search
+        # Get lookback window via binary search (O(1) with cache, O(n) without)
         cutoff = current_ts - timedelta(seconds=self.config.regime_lookback_seconds)
-        timestamps = [t.timestamp for t in trade_history]
+        if timestamps_cache is not None and len(timestamps_cache) == len(trade_history):
+            timestamps = timestamps_cache
+        else:
+            timestamps = [t.timestamp for t in trade_history]
         idx = bisect.bisect_left(timestamps, cutoff)
         window_trades = trade_history[idx:]
         
@@ -194,6 +198,9 @@ class FeatureEngine:
         # O(1) incremental CVD
         self._cvd: float = 0.0
         
+        # Incremental timestamp cache for O(1) regime classifier lookups
+        self._trade_timestamps: List[datetime] = []
+        
         # Cached pattern results
         self._cached_absorptions: List[Absorption] = []
         self._cached_sweeps: List[LiquiditySweep] = []
@@ -223,13 +230,14 @@ class FeatureEngine:
         self._cache_timestamp = None
         self._vp_features_cache = None
         self._cvd = 0.0
+        self._trade_timestamps.clear()
         self._cached_absorptions = []
         self._cached_sweeps = []
         self._cached_icebergs = []
         self._current_timestamp = None
         self._current_footprint_bar = None
         self._footprint_bar_start = None
-        self._feature_snapshots = []
+        self._feature_snapshots.clear()
     
     def update(
         self,
@@ -237,6 +245,7 @@ class FeatureEngine:
         trades: List[Trade],
         detect_patterns: bool = True,
         compute_volume_profile: bool = True,
+        precomputed_features: Optional[Dict[str, float]] = None,
     ) -> OrderFlowState:
         """
         Main entry point - update with new data and compute all features.
@@ -246,6 +255,7 @@ class FeatureEngine:
             trades: Trades since last update
             detect_patterns: If False, reuse cached pattern results (backtest throttle)
             compute_volume_profile: If False, reuse cached volume profile (backtest throttle)
+            precomputed_features: Optional precomputed features dict to skip _compute_all_features
         """
         # Data-driven timestamp
         self._current_timestamp = order_book.timestamp
@@ -254,14 +264,16 @@ class FeatureEngine:
         self.book_history.append(order_book)
         for trade in trades:
             self.trade_history.append(trade)
+            self._trade_timestamps.append(trade.timestamp)
             self._cvd += trade.size if trade.side == Side.BUY else -trade.size
             self._update_footprint_bars(trade)
         
-        # Cloud memory management - trim when large
-        if len(self.trade_history) > 20000:
-            self.trade_history = self.trade_history[-10000:]
-        if len(self.book_history) > 2000:
-            self.book_history = self.book_history[-1000:]
+        # Cloud memory management - trim when large (throttled to avoid O(n) per tick)
+        if len(self.trade_history) > 50000:
+            self.trade_history = self.trade_history[-25000:]
+            self._trade_timestamps = self._trade_timestamps[-25000:]
+        if len(self.book_history) > 5000:
+            self.book_history = self.book_history[-2500:]
         
         # Create state
         state = OrderFlowState(
@@ -270,12 +282,15 @@ class FeatureEngine:
             recent_trades=trades
         )
         
-        # Compute base features
-        state.features = self._compute_all_features(
-            order_book, 
-            trades,
-            compute_volume_profile=compute_volume_profile
-        )
+        # Compute base features (skip if precomputed provided)
+        if precomputed_features is not None:
+            state.features = precomputed_features
+        else:
+            state.features = self._compute_all_features(
+                order_book, 
+                trades,
+                compute_volume_profile=compute_volume_profile
+            )
         
         # Detect patterns (or reuse cache)
         if detect_patterns:
@@ -299,15 +314,18 @@ class FeatureEngine:
         # CRITICAL: Bridge detected patterns → strategy-consumable features
         state.features.update(self._compute_pattern_features(state))
         
-        # Classify market regime
+        # Classify market regime (O(log n) with precomputed timestamps)
         state.regime = self._regime_classifier.classify(
             self.trade_history,
             state.features,
-            self._current_timestamp
+            self._current_timestamp,
+            timestamps_cache=self._trade_timestamps,
         )
         
-        # Store temporal snapshot
+        # Store temporal snapshot (trim to prevent unbounded growth)
         self._store_feature_snapshot(order_book.timestamp, state.features)
+        if len(self._feature_snapshots) > 2000:
+            self._feature_snapshots = self._feature_snapshots[-1000:]
         
         return state
     

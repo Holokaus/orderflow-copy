@@ -597,7 +597,8 @@ class StrategyOptimizer:
         n_jobs: int = -1,
         timeout: Optional[int] = None,
         objective_type: str = "robust",
-        trial_timeout_sec: int = 60
+        trial_timeout_sec: int = 60,
+        fast_mode: bool = False,
     ) -> OptimizationResult:
         """
         Run optimization with warm start and enhanced objective.
@@ -611,10 +612,16 @@ class StrategyOptimizer:
             timeout: Overall optimization timeout in seconds
             objective_type: Type of objective (robust, sharpe, profit, profit_dd_trades)
             trial_timeout_sec: Maximum seconds per individual trial
+            fast_mode: If True, use 10 trials, 30s timeout each, 1 worker (for quick testing)
         
         Returns:
             OptimizationResult with best parameters, score, and success statistics
         """
+        if fast_mode:
+            n_trials = min(n_trials, 10)
+            trial_timeout_sec = min(trial_timeout_sec, 30)
+            n_jobs = 1
+            logger.info(f"[optimize] FAST MODE: {n_trials} trials, {trial_timeout_sec}s timeout each")
         study_name = f"{self.strategy_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         # PHASE 1 FIX: Create success stats tracker

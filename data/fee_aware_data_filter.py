@@ -68,174 +68,65 @@ class HistoricalDataFilter:
             f"lookforward={self.config.lookforward_window_ticks} ticks"
         )
     
-    def filter_ticks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Filter DataFrame to remove ticks with weak profit potential.
-        
-        Args:
-            df: DataFrame with columns: trade_price, ask_price, bid_price, timestamp (optional)
-        
-        Returns:
-            Filtered DataFrame (40-60% of original size)
-        
-        Example:
-            >>> df_raw = pd.read_parquet('raw_data.parquet')
-            >>> filter = HistoricalDataFilter()
-            >>> df_filtered = filter.filter_ticks(df_raw)
-            >>> print(f"{len(df_filtered)}/{len(df_raw)} ticks retained ({len(df_filtered)/len(df_raw)*100:.1f}%)")
-        """
-        df = df.copy()
+    def _filter_vectorized(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]:
+        """Vectorized O(n) implementation using pandas rolling."""
         n = len(df)
-        
-        logger.info(f"[filter_ticks] Starting with {n} ticks")
-        
-        # Initialize columns for analysis
-        df['max_future_profit_long'] = 0.0
-        df['max_future_profit_short'] = 0.0
-        df['is_strong_pattern'] = False
-        
         prices = df['trade_price'].values
         asks = df.get('ask_price', pd.Series([0.0] * n)).values
         bids = df.get('bid_price', pd.Series([0.0] * n)).values
-        
-        # For each tick, look forward and find profit potential
-        for i in range(n - self.config.lookforward_window_ticks):
-            future_window = prices[i+1 : i+1+self.config.lookforward_window_ticks]
-            
-            if len(future_window) == 0:
-                continue
-            
-            max_future = np.max(future_window)
-            min_future = np.min(future_window)
-            
-            current_ask = asks[i] if asks[i] > 0 else prices[i]
-            current_bid = bids[i] if bids[i] > 0 else prices[i]
-            
-            # Long profit potential: (max - entry_ask) / entry_ask
-            # Subtract exit_fee from profit
-            profit_long = (max_future - current_ask) / current_ask - self.config.taker_fee_pct
-            df.at[i, 'max_future_profit_long'] = profit_long
-            
-            # Short profit potential: (entry_bid - min) / entry_bid
-            # Subtract exit_fee from profit
-            profit_short = (current_bid - min_future) / current_bid - self.config.taker_fee_pct
-            df.at[i, 'max_future_profit_short'] = profit_short
-            
-            # Mark as strong pattern if EITHER direction covers costs
-            # Note: We check against total_cost - entry_fee is already considered
-            if profit_long >= self.config.total_cost_pct or profit_short >= self.config.total_cost_pct:
-                df.at[i, 'is_strong_pattern'] = True
-        
-        # Keep only strong pattern ticks + last lookforward ticks (can't evaluate)
-        # The last N ticks can't be evaluated (no future data), so include them
-        keep_mask = df['is_strong_pattern'] | (df.index >= n - self.config.lookforward_window_ticks)
+
+        # Create series for vectorized rolling operations
+        price_series = df['trade_price']
+
+        # Rolling max/min — Pandas uses C-optimized algorithms (O(n), not O(n*w))
+        rolling_max = price_series.rolling(window=self.config.lookforward_window_ticks, min_periods=1).max()
+        rolling_max = rolling_max.shift(-self.config.lookforward_window_ticks).fillna(prices[-1])
+
+        rolling_min = price_series.rolling(window=self.config.lookforward_window_ticks, min_periods=1).min()
+        rolling_min = rolling_min.shift(-self.config.lookforward_window_ticks).fillna(prices[-1])
+
+        max_future = rolling_max.values
+        min_future = rolling_min.values
+
+        # Vectorized profit calculations
+        current_ask = np.where(asks > 0, asks, prices)
+        current_bid = np.where(bids > 0, bids, prices)
+
+        profit_long = (max_future - current_ask) / current_ask - self.config.taker_fee_pct
+        profit_short = (current_bid - min_future) / current_bid - self.config.taker_fee_pct
+
+        # Vectorized strong pattern detection
+        is_strong = (profit_long >= self.config.total_cost_pct) | (profit_short >= self.config.total_cost_pct)
+
+        # Keep strong patterns + last lookforward ticks (can't be evaluated)
+        keep_mask = is_strong | (np.arange(n) >= n - self.config.lookforward_window_ticks)
         strong_df = df[keep_mask].copy()
-        
-        retained_pct = len(strong_df) / n * 100
-        logger.info(
-            f"[filter_ticks] Retained {len(strong_df)}/{n} ticks ({retained_pct:.1f}%) "
-            f"with profit > {self.config.total_cost_pct:.4%}"
-        )
-        
-        # Drop temporary columns
-        strong_df = strong_df.drop(columns=[
-            'max_future_profit_long',
-            'max_future_profit_short',
-            'is_strong_pattern'
-        ])
-        
-        # Reset index for consistency
         strong_df = strong_df.reset_index(drop=True)
-        
-        return strong_df
-    
-    def filter_ticks_with_stats(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]:
-        """
-        Filter ticks and return detailed statistics.
-        
-        Args:
-            df: Input DataFrame
-        
-        Returns:
-            Tuple[filtered_df, stats_dict] where stats_dict contains:
-            - original_size: Number of ticks before filtering
-            - filtered_size: Number of ticks after filtering
-            - retention_pct: Percentage retained
-            - strong_patterns_count: Number of strong patterns found
-            - weak_patterns_count: Number of weak patterns removed
-            - long_profit_mean: Average long profit potential (strong patterns)
-            - short_profit_mean: Average short profit potential (strong patterns)
-        """
-        df_work = df.copy()
-        n = len(df_work)
-        
-        # Initialize columns
-        df_work['max_future_profit_long'] = 0.0
-        df_work['max_future_profit_short'] = 0.0
-        df_work['is_strong_pattern'] = False
-        
-        prices = df_work['trade_price'].values
-        asks = df_work.get('ask_price', pd.Series([0.0] * n)).values
-        bids = df_work.get('bid_price', pd.Series([0.0] * n)).values
-        
-        strong_long_profits = []
-        strong_short_profits = []
-        
-        # Main filtering loop
-        for i in range(n - self.config.lookforward_window_ticks):
-            future_window = prices[i+1 : i+1+self.config.lookforward_window_ticks]
-            
-            if len(future_window) == 0:
-                continue
-            
-            max_future = np.max(future_window)
-            min_future = np.min(future_window)
-            
-            current_ask = asks[i] if asks[i] > 0 else prices[i]
-            current_bid = bids[i] if bids[i] > 0 else prices[i]
-            
-            profit_long = (max_future - current_ask) / current_ask - self.config.taker_fee_pct
-            profit_short = (current_bid - min_future) / current_bid - self.config.taker_fee_pct
-            
-            df_work.at[i, 'max_future_profit_long'] = profit_long
-            df_work.at[i, 'max_future_profit_short'] = profit_short
-            
-            if profit_long >= self.config.total_cost_pct or profit_short >= self.config.total_cost_pct:
-                df_work.at[i, 'is_strong_pattern'] = True
-                strong_long_profits.append(profit_long)
-                strong_short_profits.append(profit_short)
-        
-        # Filter and cleanup
-        keep_mask = df_work['is_strong_pattern'] | (df_work.index >= n - self.config.lookforward_window_ticks)
-        strong_df = df_work[keep_mask].copy()
-        strong_df = strong_df.drop(columns=[
-            'max_future_profit_long',
-            'max_future_profit_short',
-            'is_strong_pattern'
-        ])
-        strong_df = strong_df.reset_index(drop=True)
-        
-        # Compile statistics
+
+        retention_pct = len(strong_df) / n * 100
+
         stats = {
             'original_size': n,
             'filtered_size': len(strong_df),
-            'retention_pct': len(strong_df) / n * 100,
-            'strong_patterns_count': sum(df_work['is_strong_pattern']),
-            'weak_patterns_count': n - sum(df_work['is_strong_pattern']),
-            'long_profit_mean': np.mean(strong_long_profits) if strong_long_profits else 0.0,
-            'short_profit_mean': np.mean(strong_short_profits) if strong_short_profits else 0.0,
+            'retention_pct': retention_pct,
+            'strong_patterns_count': int(is_strong.sum()),
+            'weak_patterns_count': int((~is_strong).sum()),
+            'long_profit_mean': float(np.mean(profit_long[is_strong])) if is_strong.any() else 0.0,
+            'short_profit_mean': float(np.mean(profit_short[is_strong])) if is_strong.any() else 0.0,
         }
-        
+
         logger.info(
-            f"[filter_ticks_with_stats] "
-            f"Original: {stats['original_size']}, "
-            f"Filtered: {stats['filtered_size']} ({stats['retention_pct']:.1f}%), "
-            f"Strong patterns: {stats['strong_patterns_count']}, "
-            f"Avg long profit: {stats['long_profit_mean']:.4%}, "
-            f"Avg short profit: {stats['short_profit_mean']:.4%}"
+            f"[filter_ticks] Vectorized: {n} -> {len(strong_df)} ticks "
+            f"({retention_pct:.1f}%) with profit > {self.config.total_cost_pct:.4%}"
         )
-        
         return strong_df, stats
+
+    def filter_ticks(self, df: pd.DataFrame) -> pd.DataFrame:
+        filtered, _ = self._filter_vectorized(df)
+        return filtered
+
+    def filter_ticks_with_stats(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, dict]:
+        return self._filter_vectorized(df)
     
     def save_filtered_data(self, df: pd.DataFrame, output_path: str) -> None:
         """

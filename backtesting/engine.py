@@ -31,6 +31,7 @@ from core.data_structures import (
 )
 from core.feature_engine import FeatureEngine, FeatureConfig
 from core.fee_aware_filter import FeeAwareFilter
+from core.feature_precomputer import FeaturePrecomputer
 from knowledge.strategy_library import StrategyDefinition
 from execution.risk_manager import RiskManager, RiskLimits, RiskAction
 
@@ -189,6 +190,10 @@ class BacktestEngine:
 
         # FIX: Store feature config for creating FeatureEngine
         self._feature_config = feature_config or FeatureConfig()
+        self.windows = self._feature_config.windows
+
+        # Feature precomputer (optional, created during run())
+        self.precomputer: Optional[FeaturePrecomputer] = None
 
         # Fee-aware filter
         self.fee_filter = FeeAwareFilter(
@@ -363,6 +368,10 @@ class BacktestEngine:
         n_rows = len(rows)
         logger.debug(f"Running backtest with {n_rows} data points")
         
+        # Precompute features before loop (massive speedup)
+        self.precomputer = FeaturePrecomputer(windows=self.windows)
+        self.precomputer.precompute_all(data)
+        
         # DEPTH CHECK - Verify data loading
         if len(rows) > 0:
             sample = rows[0]
@@ -415,10 +424,13 @@ class BacktestEngine:
             run_patterns = (tick_idx % pattern_every == 0)
             run_vp = (tick_idx % vp_every == 0)
 
+            precomputed = self.precomputer.get_features_for_tick(tick_idx) if self.precomputer else None
+
             state = self.feature_engine.update(
                 order_book, trades,
                 detect_patterns=run_patterns,
                 compute_volume_profile=run_vp,
+                precomputed_features=precomputed,
             )
 
             # FIX: REMOVED state.regime override — FeatureEngine's classifier is used

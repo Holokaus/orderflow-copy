@@ -85,10 +85,16 @@ class GlassnodeConnector:
         """
         self.api_key = api_key
         self.asset = asset
-        self.cache = {}  # Simple cache to avoid repeated requests
+        self.cache = {}
         self.cache_ttl_sec = 3600  # 1 hour
         
-        logger.info(f"[GlassnodeConnector] Initialized for {asset}")
+        if not api_key:
+            logger.warning(
+                "[GlassnodeConnector] No API key provided — on-chain requests will fail. "
+                "Set GLASSNODE_API_KEY env var or pass api_key to constructor."
+            )
+        else:
+            logger.info(f"[GlassnodeConnector] Initialized for {asset} with API key")
     
     def _get_metric(
         self,

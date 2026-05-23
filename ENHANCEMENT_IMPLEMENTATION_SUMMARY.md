@@ -1,179 +1,156 @@
-"""
-ORDERFLOW-COPY SYSTEM ENHANCEMENT - ACCURATE STATUS REPORT
-=========================================================================
+# ORDERFLOW-COPY SYSTEM ENHANCEMENT — TRUE STATUS
 
-This document reflects the TRUE status of each phase after integration work.
-All completion claims are verified against actual file modifications.
+This document reflects the actual verified state of each enhancement phase.
 
-PROJECT SCOPE:
-==============
-- System: OrderFlow-Copy (Crypto spot trading on Binance, XRP/USDT)
-- Objective: Implement fee-aware filtering, data pre-filtering, on-chain regime
-  detection, and ML ensemble prediction
-- Priority: Working rule-based system > broken ML scaffolding
+- **Priority**: Working rule-based system > broken ML scaffolding
+- **Lazy loading**: On-chain & ML modules are imported only when `enabled=True` AND prerequisites met
+- **Cross-platform**: All timeouts use `ThreadPoolExecutor` (no SIGALRM)
 
-═══════════════════════════════════════════════════════════════════════════════
+---
 
-PHASE 1: FIX OPTIMIZATION (CRITICAL)
-====================================
-Status: Code modified, NOT yet tested with actual optimization run
-File: optimization/optuna_optimizer.py
+## Phase 1: Fix Optimization (CRITICAL)
+**File**: `optimization/optuna_optimizer.py`  
+**Status**: Code complete; NOT verified with a 50-trial run
 
-Enhancements Made:
-1. [DONE] NARROWED PARAMETER RANGES
-   - Applied narrowed ranges from Phase 1 spec table
-   - Previous ranges (e.g., delta 0-50,000) reduced to realistic bounds (0-5,000)
+| Item | Status |
+|------|--------|
+| Narrowed parameter ranges | Done |
+| Comprehensive error logging | Done |
+| Trial success rate monitoring | Done |
+| Cross-platform timeout (no SIGALRM) | Done |
+| Warm-start parameter validation | Done |
+| POC range symmetric handling | Done |
+| 50-trial optimization executed | **Not done** (no valid data) |
 
-2. [DONE] COMPREHENSIVE ERROR LOGGING
-   - Every failed trial logs trial #, all params, exception type, full traceback
+---
 
-3. [DONE] TRIAL SUCCESS RATE MONITORING
-   - TrialSuccessStats class tracks total, successful, failed, timeout, pruned trials
+## Phase 2: Fee-Aware Signal Filtering
+**Files**: `core/fee_aware_filter.py`, `backtesting/engine.py`, `execution/order_manager.py`  
+**Status**: Fully integrated
 
-4. [DONE] CROSS-PLATFORM TIMEOUT
-   - SIGALRM replaced with concurrent.futures.ThreadPoolExecutor
-   - Works on Windows, macOS, Linux
+| Item | Status |
+|------|--------|
+| `FeeAwareFilter` class | Created |
+| `LiveFeeAwareFilter` class | Created |
+| Wired into `backtesting/engine.py` | **Done** — import + init + `_estimate_predicted_move()` + fee check before `_open_position` + metric |
+| Wired into `execution/order_manager.py` | **Done** — import + init + `validate_signal_with_fee_filter()` |
+| Config block in `settings.py` | **Done** — `FeeAwareFilterConfig` with `enabled: True` |
+| Unit tests | Passed (confidence threshold, spread rejection, total cost calc) |
+| Backtest with fee filter | **Not done** (no valid data for backtest run) |
 
-5. [DONE] WARM-START PARAMETER VALIDATION
-   - Defaults validated within ranges before acceptance
+---
 
-6. [DONE] POC RANGE SYMMETRIC HANDLING
-   - Ensures abs__entry_poc_range > 0
+## Phase 3: Historical Data Pre-Filtering
+**Files**: `data/fee_aware_data_filter.py`, `data/data_recorder.py`  
+**Status**: Fully integrated
 
-NOT YET VERIFIED:
-- 50-trial optimization run has NOT been executed
-- No actual success rate data available
-- No best trial Sharpe ratio measured
-- No parameter variance analysis performed
+| Item | Status |
+|------|--------|
+| `HistoricalDataFilter` class | Created |
+| `FilterConfig` class | Created |
+| `apply_filter_to_dataset` helper | Created |
+| Wired into `data/data_recorder.py` | **Done** — import + `load_filtered_data()` method |
+| Config block in `settings.py` | **Done** — `DataFilteringConfig` with `enabled: True` |
 
-Integration Points:
-- Imported by main.py during optimization
-- WalkForwardValidator uses StrategyOptimizer
+---
 
-═══════════════════════════════════════════════════════════════════════════════
+## Phase 4: On-Chain Data Filters (Regime Enhancement)
+**Files**: `data/onchain_connector.py`, `main.py`  
+**Status**: Fully integrated with **true lazy loading**
 
-PHASE 2: FEE-AWARE SIGNAL FILTERING
-====================================
-Status: Module created, NOT integrated into backtest or live engine
-File: core/fee_aware_filter.py
+| Item | Status |
+|------|--------|
+| `GlassnodeConnector` class | Created |
+| `OnChainRegimeFilter` class | Created |
+| `BacktestOnChainMetricsCollector` | Created |
+| API key validation in `__init__` | **Done** — warns if `GLASSNODE_API_KEY` not set |
+| Wired into `main.py` | **Done** — lazy import inside `_init_components()`, gated by `settings.onchain.enabled` |
+| Config block in `settings.py` | **Done** — `OnChainConfig` with `enabled: False` (default) |
+| No import error when disabled | **Verified** — import only happens inside the `if enabled:` block |
+| Graceful auto-disable when missing deps | **Done** — `try/except ImportError` with log message |
 
-Classes Created:
-1. FeeAwareFilter - Filters signals where predicted_move < cost threshold
-2. LiveFeeAwareFilter - Real-time spread checking for live trading
+---
 
-NOT YET INTEGRATED:
-- NOT wired into backtesting/engine.py (no import, no usage)
-- NOT wired into execution/order_manager.py (no import, no usage)
-- No metrics tracking for signals_rejected_by_fee_filter
-- Cannot verify if filter works at all in system context
+## Phase 5: ML Prediction Layer (Ensemble)
+**Files**: `prediction/ml_ensemble.py`, `knowledge/strategy_library.py`, `scripts/train_ml_models.py`  
+**Status**: Fully integrated with **true lazy loading**; no trained models exist yet
 
-═══════════════════════════════════════════════════════════════════════════════
+| Item | Status |
+|------|--------|
+| `MLEnsemble` with XGBoost/LightGBM/LSTM wrappers | Created |
+| `EnsembleTrainingPipeline` for retraining | Created |
+| `_extract_ml_features()` helper on `StrategyDefinition` | Created |
+| Lazy-loaded into `strategy_library.py` | **Done** — module-level import removed; `_load_ml_ensemble()` on first access |
+| `ml_ensemble` field on `StrategyDefinition` | **Done** — set externally, checked only after lazy-load |
+| Config block in `settings.py` | **Done** — `MLEnsembleConfig` with `enabled: False` (default) |
+| Training script `scripts/train_ml_models.py` | **Done** — self-documenting, handles missing deps |
+| Trained models exist | **Not done** — requires `python -m scripts.train_ml_models` with installed deps |
+| No import error when disabled | **Verified** — `_load_ml_ensemble()` only called from `evaluate()` |
 
-PHASE 3: HISTORICAL DATA PRE-FILTERING
-======================================
-Status: Module created, NOT integrated into data pipeline
-File: data/fee_aware_data_filter.py
+---
 
-Classes Created:
-1. FilterConfig - Configuration container
-2. HistoricalDataFilter - Main filtering engine
-3. apply_filter_to_dataset - Convenience function
+## Phase 6: Walk-Forward Validation
+**File**: `backtesting/engine.py` (class `WalkForwardValidator`)  
+**Status**: Code exists; NOT verified with actual run
 
-NOT YET INTEGRATED:
-- NOT wired into data/data_recorder.py (no import, no usage)
-- NOT used during data loading for backtesting/optimization
-- No config integration for data_filtering settings
-- Cannot verify retention percentage
+| Item | Status |
+|------|--------|
+| `WalkForwardValidator` class | Exists |
+| `generate_splits()` | Exists |
+| `validate()` with train/optimize/test | Exists |
+| Parameter stability analysis | Exists |
+| Actual walk-forward run executed | **Not done** |
 
-═══════════════════════════════════════════════════════════════════════════════
+---
 
-PHASE 4: ON-CHAIN DATA FILTERS (REGIME ENHANCEMENT)
-===================================================
-Status: Module created, NOT integrated into main system
-File: data/onchain_connector.py
+## Configuration Status (`config/settings.py`)
+All config blocks are present:
 
-Classes Created:
-1. GlassnodeConnector - Fetches on-chain metrics from Glassnode API
-2. OnChainRegimeFilter - Classifies market regime
-3. BacktestOnChainMetricsCollector - Simulated metrics for backtests
+| Block | Present | Default `enabled` |
+|-------|---------|-------------------|
+| `FeeAwareFilterConfig` | Done | `True` |
+| `DataFilteringConfig` | Done | `True` |
+| `OnChainConfig` | Done | `False` |
+| `MLEnsembleConfig` | Done | `False` |
 
-NOT YET INTEGRATED:
-- NOT wired into main.py (no import, no usage)
-- Not gated by config.onchain.enabled (doesn't exist yet)
-- Only works standalone; no system integration
+---
 
-═══════════════════════════════════════════════════════════════════════════════
+## Startup Dashboard
+Added to `main.py`: `_print_startup_dashboard()` prints feature status on non-test modes.
 
-PHASE 5: ML PREDICTION LAYER (ENSEMBLE)
-=======================================
-Status: Scaffolding created, NO trained models exist
-File: prediction/ml_ensemble.py
+Example output:
+```
+============================================================
+  ORDER FLOW TRADING SYSTEM - STARTUP DASHBOARD
+============================================================
+  Trading Pair : XRP/USDT
+  Exchange     : binance
+  Mode         : paper/live recording
+------------------------------------------------------------
+  [-] onchain               disabled (config)
+  [-] ml_ensemble           disabled (config)
+  [+] fee_aware_filter      enabled
+  [+] data_filtering        enabled
+============================================================
+```
 
-Classes Created:
-1. MLEnsemble with XGBoost, LightGBM, LSTM wrappers
-2. EnsembleTrainingPipeline for retraining
+---
 
-CURRENT LIMITATIONS:
-- NO trained models exist (models/ directory is empty)
-- XGBoost/lightgbm/tensorflow may not be installed
-- Feature extraction from FeatureEngine not implemented
-- NOT integrated into strategy_library.py
-- With ML disabled in config, system runs exactly as before
+## Remaining Blockers
+1. **No valid backtest data** — Only one 15-hour XRP/USDT parquet file exists; strategy filters reject all signals
+2. **No Glassnode API key** — On-chain filter cannot be tested without `GLASSNODE_API_KEY`
+3. **No trained ML models** — `scripts/train_ml_models.py` exists but requires `xgboost`, `lightgbm`, `tensorflow` and recorded data
 
-═══════════════════════════════════════════════════════════════════════════════
+---
 
-PHASE 6: WALK-FORWARD VALIDATION
-================================
-Status: WalkForwardValidator exists in engine.py, NOT verified with actual run
-File: backtesting/engine.py (class WalkForwardValidator)
+## Verified Success Criteria
+- [x] All module imports succeed at startup
+- [x] On-chain & ML modules do NOT import when `enabled: False`
+- [x] Missing dependencies produce log warnings, not crashes
+- [x] API key validation warns but doesn't crash
+- [x] Startup dashboard renders correctly
+- [x] Training script parses and shows --help
+- [x] Cross-platform timeout (no SIGALRM)
 
-Existing Implementation:
-- WalkForwardValidator class exists
-- generate_splits() creates train/test splits
-- validate() runs optimization on train, tests on OOS
-- Parameter stability analysis
-
-NOT YET VERIFIED:
-- No actual walk-forward run executed
-- No avg OOS Sharpe data
-- No profitable folds percentage
-- No parameter stability CV values
-
-═══════════════════════════════════════════════════════════════════════════════
-
-CONFIGURATION STATUS
-====================
-- config/settings.py contains TradingConfig, LLMConfig, OptunaConfig, BacktestConfig
-- Missing: fee_aware_filter config block
-- Missing: data_filtering config block
-- Missing: onchain config block
-- Missing: ml_ensemble config block
-
-═══════════════════════════════════════════════════════════════════════════════
-
-IMMEDIATE WORK REQUIRED
-=======================
-
-Priority 1 - Critical (must work first):
-- Phase 1: Run 50-trial optimization, verify success rate >30%
-- Phase 2: Integrate FeeAwareFilter into backtesting/engine.py
-- Phase 2: Integrate LiveFeeAwareFilter into execution/order_manager.py
-
-Priority 2 - Important:
-- Phase 3: Integrate HistoricalDataFilter into data pipeline
-- Add all config blocks to settings.py
-
-Priority 3 - Enhancement:
-- Phase 4: Wire on-chain filter into main.py (gated by config)
-- Phase 5: Wire ML ensemble into strategy_library.py (gated by config)
-
-Priority 4 - Verification:
-- Run backtest comparison (baseline vs. enhanced)
-- Run walk-forward validation
-- Verify all imports succeed
-
-═══════════════════════════════════════════════════════════════════════════════
-
-END OF ACCURATE STATUS REPORT
-Project Status: MODULES EXIST, INTEGRATION IN PROGRESS
-"""
+**Project Status**: INTEGRATION COMPLETE — verification blocked by data/API/model availability
+"

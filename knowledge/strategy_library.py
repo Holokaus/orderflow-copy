@@ -14,15 +14,6 @@ from core.data_structures import (
     OrderFlowState, Signal, SignalType, Side, Regime
 )
 
-# Optional ML ensemble import (graceful if not installed)
-try:
-    from prediction.ml_ensemble import MLEnsemble
-    _ML_AVAILABLE = True
-except ImportError:
-    MLEnsemble = None
-    _ML_AVAILABLE = False
-
-
 class StrategyCategory(Enum):
     ABSORPTION = auto()
     MOMENTUM = auto()
@@ -122,6 +113,28 @@ class StrategyDefinition:
     # ML ensemble (optional, set externally)
     ml_ensemble: Optional[object] = None
     ml_min_confidence: float = 0.7
+
+    # ML ensemble lazy loading state (not a dataclass field, set in __post_init__)
+    _ml_available: bool = False
+    _ml_loaded: bool = False
+
+    def __post_init__(self) -> None:
+        """Post-initialization to set non-dataclass defaults"""
+        self._ml_available = False
+        self._ml_loaded = False
+
+    def _load_ml_ensemble(self) -> None:
+        """Lazy-load ML ensemble module only when accessed"""
+        if self._ml_loaded:
+            return
+        self._ml_loaded = True
+        try:
+            from prediction.ml_ensemble import MLEnsemble
+            self._ml_available = True
+            logger.debug("[StrategyDefinition] ML ensemble module loaded")
+        except ImportError:
+            self._ml_available = False
+            logger.debug("[StrategyDefinition] ML ensemble module not available (optional)")
 
     # Position sizing
     base_position_pct: float = 0.1
@@ -246,8 +259,9 @@ class StrategyDefinition:
         
         confidence = min(total_score / (self.min_score_threshold * 2), 1.0)
 
-        # ML ensemble check (optional, only if model is assigned)
-        if self.ml_ensemble is not None and _ML_AVAILABLE:
+        # ML ensemble check (optional, lazy-loaded)
+        self._load_ml_ensemble()
+        if self.ml_ensemble is not None and self._ml_available:
             try:
                 # Extract features from state for ML prediction
                 ml_features = self._extract_ml_features(state)

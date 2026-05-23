@@ -41,7 +41,6 @@ from execution.risk_manager import RiskManager, RiskLimits
 from execution.order_manager import OrderManager
 from data.exchange_connector import ExchangeConnector, ExchangeConfig
 from data.data_recorder import DataRecorder
-from data.onchain_connector import GlassnodeConnector, OnChainRegimeFilter
 
 
 class OrderFlowSystem:
@@ -68,8 +67,8 @@ class OrderFlowSystem:
         self.order_manager: Optional[OrderManager] = None
         self.exchange: Optional[ExchangeConnector] = None
         self.data_recorder: Optional[DataRecorder] = None
-        self.onchain_connector: Optional[GlassnodeConnector] = None
-        self.onchain_filter: Optional[OnChainRegimeFilter] = None
+        self.onchain_connector: Optional[Any] = None
+        self.onchain_filter: Optional[Any] = None
         
         # State
         self.running = False
@@ -112,15 +111,69 @@ class OrderFlowSystem:
                 symbol=self.settings.trading.symbol.replace('/', '')
             )
         
-        # On-chain filter (optional, gated by config)
+        # On-chain filter (optional, lazy import — no error if missing deps)
         if self.settings.onchain.enabled:
-            self.onchain_connector = GlassnodeConnector(
-                api_key=self.settings.onchain.api_key,
-                asset=self.settings.trading.symbol.split('/')[0]
-            )
-            self.onchain_filter = OnChainRegimeFilter()
-            logger.info("On-chain regime filter enabled")
+            try:
+                from data.onchain_connector import GlassnodeConnector, OnChainRegimeFilter
+                self.onchain_connector = GlassnodeConnector(
+                    api_key=self.settings.onchain.api_key,
+                    asset=self.settings.trading.symbol.split('/')[0]
+                )
+                self.onchain_filter = OnChainRegimeFilter()
+                logger.info("On-chain regime filter enabled")
+            except ImportError as e:
+                logger.warning(f"On-chain filter disabled — missing dependency: {e}")
+                logger.warning("  pip install requests  # required for on-chain")
     
+    def validate_optional_features(self) -> dict:
+        """Check optional feature health and return status dict"""
+        status = {}
+        # On-chain
+        if self.settings.onchain.enabled:
+            if self.onchain_connector:
+                status["onchain"] = "ready"
+            else:
+                status["onchain"] = "disabled (import failed)"
+        else:
+            status["onchain"] = "disabled (config)"
+        # ML ensemble
+        if self.settings.ml_ensemble.enabled:
+            try:
+                from prediction.ml_ensemble import MLEnsemble
+                status["ml_ensemble"] = "ready"
+            except ImportError as e:
+                status["ml_ensemble"] = f"missing deps: {e}"
+        else:
+            status["ml_ensemble"] = "disabled (config)"
+        # Fee-aware filter
+        if self.settings.fee_aware_filter.enabled:
+            status["fee_aware_filter"] = "enabled"
+        else:
+            status["fee_aware_filter"] = "disabled"
+        # Data filtering
+        if self.settings.data_filtering.enabled:
+            status["data_filtering"] = "enabled"
+        else:
+            status["data_filtering"] = "disabled"
+        return status
+
+    def _print_startup_dashboard(self) -> None:
+        """Print startup dashboard with feature status"""
+        print("\n" + "=" * 60)
+        print("  ORDER FLOW TRADING SYSTEM — STARTUP DASHBOARD")
+        print("=" * 60)
+        print(f"  Trading Pair : {self.settings.trading.symbol}")
+        print(f"  Exchange     : {self.settings.trading.exchange.value}")
+        print(f"  Mode         : paper/live recording")
+        print("-" * 60)
+        status = self.validate_optional_features()
+        for feature, state in status.items():
+            if "disabled" in state:
+                print(f"  [-] {feature:20s}  {state}")
+            else:
+                print(f"  [+] {feature:20s}  {state}")
+        print("=" * 60 + "\n")
+
     def _get_feature_config(self) -> FeatureConfig:
         """Get standardized FeatureConfig for this system"""
         return FeatureConfig(
@@ -647,6 +700,10 @@ def main():
     
     # Create system
     system = OrderFlowSystem()
+    
+    # Print startup dashboard (non-test modes only)
+    if args.mode != 'test':
+        system._print_startup_dashboard()
     
     # Run appropriate mode
     if args.mode == 'record':

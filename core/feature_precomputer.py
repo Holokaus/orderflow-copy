@@ -53,6 +53,41 @@ class FeaturePrecomputer:
         bid_sizes = df.get("bid_size", pd.Series(np.zeros(n))).values.astype(np.float64)
         ask_sizes = df.get("ask_size", pd.Series(np.zeros(n))).values.astype(np.float64)
 
+        # ─── Compute bid_depth_10 and ask_depth_10 as SUM of 10 levels ───
+        bid_depth_10 = np.zeros(n, dtype=np.float64)
+        ask_depth_10 = np.zeros(n, dtype=np.float64)
+        
+        # Detect how many depth levels exist (bid_size_0, bid_size_1, ..., bid_size_9, etc.)
+        n_depth_levels = 0
+        while f'bid_size_{n_depth_levels}' in df.columns:
+            n_depth_levels += 1
+        
+        if n_depth_levels > 0:
+            # Sum up to 10 levels (or however many exist)
+            levels_to_sum = min(10, n_depth_levels)
+            for level in range(levels_to_sum):
+                bid_col = f'bid_size_{level}'
+                ask_col = f'ask_size_{level}'
+                if bid_col in df.columns:
+                    bid_depth_10 += df[bid_col].values.astype(np.float64)
+                if ask_col in df.columns:
+                    ask_depth_10 += df[ask_col].values.astype(np.float64)
+            logger.info(f"[FeaturePrecomputer] Detected {n_depth_levels} depth levels; summing {levels_to_sum} levels for bid_depth_10/ask_depth_10")
+        else:
+            # Fallback: use best bid/ask only
+            bid_depth_10 = bid_sizes.copy()
+            ask_depth_10 = ask_sizes.copy()
+            logger.warning(f"[FeaturePrecomputer] No depth level columns (bid_size_0, etc.) found; using best bid/ask only")
+        
+        # Validate depth (warn if unrealistic)
+        valid_depths = bid_depth_10[bid_depth_10 > 0]
+        if len(valid_depths) > 0:
+            mean_depth = np.mean(valid_depths)
+            if mean_depth < 1000:
+                logger.warning(f"[FeaturePrecomputer] WARNING: Mean bid_depth_10 = {mean_depth:.0f} < 1000 (unrealistic for XRP/USDT). Check data loading.")
+        else:
+            logger.error(f"[FeaturePrecomputer] ERROR: All bid_depth_10 values are 0! Depth data may not be loaded correctly.")
+
         # Side as numeric: 1 = BUY, 0 = SELL
         if "trade_side" in df.columns:
             sides = (df["trade_side"].astype(str).str.lower()
@@ -161,10 +196,10 @@ class FeaturePrecomputer:
             self.precomputed["atr_60"] = atr
 
         # ─── 5. Book features per tick ───
-        self.precomputed["bid_depth_10"] = bid_sizes
-        self.precomputed["ask_depth_10"] = ask_sizes
-        total_depth = bid_sizes + ask_sizes + 1e-9
-        self.precomputed["depth_imbalance_10"] = (bid_sizes - ask_sizes) / total_depth
+        self.precomputed["bid_depth_10"] = bid_depth_10
+        self.precomputed["ask_depth_10"] = ask_depth_10
+        total_depth = bid_depth_10 + ask_depth_10 + 1e-9
+        self.precomputed["depth_imbalance_10"] = (bid_depth_10 - ask_depth_10) / total_depth
         self.precomputed["best_bid_size"] = bid_sizes
         self.precomputed["best_ask_size"] = ask_sizes
         denom = bid_sizes + ask_sizes

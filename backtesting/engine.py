@@ -269,15 +269,33 @@ class BacktestEngine:
     def _preprocess(data: pd.DataFrame) -> List[_Row]:
         """Convert DataFrame to lightweight _Row objects."""
         
-        # === FIX: Map _0 columns to base columns ===
-        # (Because we dropped the redundant ones in the Parquet conversion)
-        if 'bid_price' not in data.columns and 'bid_price_0' in data.columns:
+        # === FIX: ALWAYS Map _0 columns to base columns ===
+        # - If base columns don't exist, copy from _0
+        # - If base columns exist but are all zeros/NaN, replace with _0
+        if 'bid_price_0' in data.columns:
             data = data.copy()
-            data['bid_price'] = data['bid_price_0']
-            data['ask_price'] = data['ask_price_0']
-            data['bid_size'] = data['bid_size_0']
-            data['ask_size'] = data['ask_size_0']
-        # ============================================
+            
+            # Check if bid_price is invalid (missing, all zeros, or all NaN)
+            if 'bid_price' not in data.columns or \
+               (data['bid_price'].fillna(0) == 0).all() or \
+               data['bid_price'].isna().all():
+                data['bid_price'] = data['bid_price_0']
+                
+            if 'ask_price' not in data.columns or \
+               (data['ask_price'].fillna(0) == 0).all() or \
+               data['ask_price'].isna().all():
+                data['ask_price'] = data['ask_price_0']
+                
+            if 'bid_size' not in data.columns or \
+               (data['bid_size'].fillna(0) == 0).all() or \
+               data['bid_size'].isna().all():
+                data['bid_size'] = data['bid_size_0']
+                
+            if 'ask_size' not in data.columns or \
+               (data['ask_size'].fillna(0) == 0).all() or \
+               data['ask_size'].isna().all():
+                data['ask_size'] = data['ask_size_0']
+        # ========================================================
         
         timestamps = pd.to_datetime(data['timestamp']).dt.to_pydatetime()
 

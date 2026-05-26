@@ -331,8 +331,8 @@ class StrategyDefinition:
         if abs(delta_pct) > 0.1:
             directional_score += 1 if delta_pct > 0 else -1
         
-        # Pressure: use sign with magnitude threshold
-        if abs(pressure) > 0:
+        # Pressure: use sign with MEANINGFUL magnitude threshold
+        if abs(pressure) > 50000:    # ~P25 of net_pressure distribution
             directional_score += 1 if pressure > 0 else -1
         
         if directional_score >= 2:
@@ -443,10 +443,10 @@ def create_absorption_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="recent_absorption_strength",
                 operator=">=",
-                threshold=0.30,
+                threshold=0.10,
                 weight=2.0,
-                required=True,
-                param_key="abs__entry_str_min"  # Optimizer controls this threshold
+                required=False,
+                param_key="abs__entry_str_min"
             ),
             StrategyCondition(
                 feature="volume_acceleration",
@@ -516,14 +516,6 @@ def create_absorption_strategy() -> StrategyDefinition:
                 operator="<",
                 threshold=1500.0,
                 param_key="abs__filter_ask_min"
-            ),
-            # Price change filter: REJECT if outside symmetric range (dead/choppy market protection)
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.005,
-                threshold_high=0.005,
-                param_key="abs__filter_chg300_range"
             ),
         ],
         
@@ -624,18 +616,12 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=1500.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
-            ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=1500.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -644,7 +630,7 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
         # FIX 2: 3:1 risk/reward ratio
         stop_loss_atr_mult=2.0,
         take_profit_atr_mult=6.0,
-        allowed_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.RANGING]
+        allowed_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION]
     )
 
 
@@ -712,18 +698,12 @@ def create_liquidity_sweep_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=1500.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
-            ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=1500.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -798,18 +778,20 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=1500.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
+                threshold=1500.0  # XRP-specific: reject thin asks
             ),
+            # Momentum strategy: reject calm markets (no momentum to trade)
+            # NOTE: ±0.001 (0.1%) for XRP; would need wider for BTC
             StrategyCondition(
                 feature="price_change_pct_300s",
                 operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=-0.001,
+                threshold_high=0.001
             ),
         ],
         
@@ -888,18 +870,12 @@ def create_value_area_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=1500.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
-            ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=1500.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -908,7 +884,7 @@ def create_value_area_strategy() -> StrategyDefinition:
         # FIX 2: 3:1 risk/reward ratio
         stop_loss_atr_mult=2.0,
         take_profit_atr_mult=6.0,
-        allowed_regimes=[Regime.RANGING]
+        allowed_regimes=[Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION]
     )
 
 

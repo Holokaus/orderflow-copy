@@ -50,7 +50,7 @@ class TradingConfig(BaseModel):
     # Execution
     min_time_between_trades_sec: int = 30
     slippage_estimate_pct: float = 0.0005  # 0.05%
-    fee_pct: float = 0.0004  # 0.04% maker
+    fee_pct: float = 0.001   # 0.1% taker (Binance spot realistic)
     
     #Add tick_size to the TradingConfig so it can be passed to the feature engine.
     tick_size: float = 0.0001  # <--- XRP typically uses 0.0001 or 0.01

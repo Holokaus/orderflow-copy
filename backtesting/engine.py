@@ -828,13 +828,16 @@ class BacktestEngine:
                     latest_abs.strength >= 0.6):  # [FIXED] was Side.BUY
                 return "absorption_against"
 
-        # 3b) Delta divergence against
+        # 3b) Delta divergence against (check divergence direction)
         delta_div = features.get("delta_divergence_60s", 0)
         if delta_div == 1.0:
-            delta_60 = features.get("delta_60s", 0)
-            if self.position.side == Side.BUY and delta_60 < 0:
+            price_dir_60 = np.sign(features.get("price_change_pct_60s", 0))
+            delta_dir_60 = np.sign(features.get("delta_pct_60s", 0))
+            # Bearish divergence: price up, delta down → exit long
+            if self.position.side == Side.BUY and price_dir_60 > 0 and delta_dir_60 < 0:
                 return "delta_divergence_against"
-            if self.position.side == Side.SELL and delta_60 > 0:
+            # Bullish divergence: price down, delta up → exit short
+            if self.position.side == Side.SELL and price_dir_60 < 0 and delta_dir_60 > 0:
                 return "delta_divergence_against"
 
         # 3c) Exhaustion

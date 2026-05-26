@@ -33,8 +33,8 @@ class FeatureConfig:
     tick_size: float = 0.0001  # 0.5 for BTCUSD specific (was 0.01 - too granular) Now 0.0001 for XRP
     
     # Absorption detection
-    absorption_volume_multiplier: float = 2.0
-    absorption_price_threshold_pct: float = 0.0001
+    absorption_volume_multiplier: float = 1.5
+    absorption_price_threshold_pct: float = 0.001
     absorption_min_duration_sec: float = 1.0
     
     # Imbalance detection
@@ -313,6 +313,9 @@ class FeatureEngine:
         
         # CRITICAL: Bridge detected patterns → strategy-consumable features
         state.features.update(self._compute_pattern_features(state))
+        
+        # Always compute footprint features (critical: precomputed path skips _compute_all_features)
+        state.features.update(self._compute_footprint_features())
         
         # Always compute composite features (critical: precomputed path skips _compute_all_features)
         state.features.update(self._compute_composite_features(state.features))

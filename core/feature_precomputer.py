@@ -200,6 +200,7 @@ class FeaturePrecomputer:
         self.precomputed["ask_depth_10"] = ask_depth_10
         total_depth = bid_depth_10 + ask_depth_10 + 1e-9
         self.precomputed["depth_imbalance_10"] = (bid_depth_10 - ask_depth_10) / total_depth
+        self.precomputed["abs_depth_imbalance_10"] = np.abs(self.precomputed["depth_imbalance_10"])
         self.precomputed["best_bid_size"] = bid_sizes
         self.precomputed["best_ask_size"] = ask_sizes
         denom = bid_sizes + ask_sizes
@@ -244,6 +245,7 @@ class FeaturePrecomputer:
             f"total_volume_{window_sec}s": total_vol,
             f"delta_{window_sec}s": delta,
             f"delta_pct_{window_sec}s": delta / (total_vol + 1e-9),
+            f"abs_delta_pct_{window_sec}s": abs(delta) / (total_vol + 1e-9),
             f"abs_delta_{window_sec}s": abs(delta),
             f"trade_count_{window_sec}s": total_cnt,
             f"trade_intensity_{window_sec}s": total_cnt / window_sec if window_sec > 0 else 0.0,
@@ -282,7 +284,7 @@ class FeaturePrecomputer:
         # Book features (precomputed)
         for key in ["mid_price", "spread_bps", "best_bid_size", "best_ask_size",
                      "best_level_imbalance", "bid_depth_10", "ask_depth_10",
-                     "depth_imbalance_10"]:
+                     "depth_imbalance_10", "abs_depth_imbalance_10"]:
             features[key] = float(self.precomputed[key][tick_idx])
 
         # ATR

@@ -174,7 +174,7 @@ class BacktestEngine:
         warmup_seconds: float = 60.0,
         min_time_between_trades_sec: float = 30.0,
         equity_floor_pct: float = 0.50,
-        suspicious_pnl_pct: float = 0.10,
+        suspicious_pnl_pct: float = 0.30,
         risk_limits: Optional[RiskLimits] = None,
         feature_config: Optional[FeatureConfig] = None,  # NEW: accept config
     ):
@@ -212,7 +212,7 @@ class BacktestEngine:
             max_trades_per_day=50,
             max_trades_per_hour=10,
             min_time_between_trades_sec=int(min_time_between_trades_sec),
-            max_consecutive_losses=5,
+            max_consecutive_losses=20,
         )
 
         # State (initialized in reset())
@@ -498,7 +498,11 @@ class BacktestEngine:
 
                     # Fee-aware filter check (before opening position)
                     signal_to_check = adjusted_signal or signal
-                    predicted_move_pct = self._estimate_predicted_move(state, strategy)
+                    # Use actual signal TP distance when available, not ATR estimate
+                    if signal_to_check.entry_price > 0 and signal_to_check.take_profit != signal_to_check.entry_price:
+                        predicted_move_pct = abs(signal_to_check.take_profit - signal_to_check.entry_price) / signal_to_check.entry_price
+                    else:
+                        predicted_move_pct = self._estimate_predicted_move(state, strategy)
                     if predicted_move_pct > 0:
                         should_ignore, fee_reason = self.fee_filter.should_ignore_signal(
                             signal_to_check, predicted_move_pct, signal_to_check.confidence

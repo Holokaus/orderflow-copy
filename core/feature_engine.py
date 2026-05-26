@@ -314,6 +314,9 @@ class FeatureEngine:
         # CRITICAL: Bridge detected patterns → strategy-consumable features
         state.features.update(self._compute_pattern_features(state))
         
+        # Always compute composite features (critical: precomputed path skips _compute_all_features)
+        state.features.update(self._compute_composite_features(state.features))
+        
         # Classify market regime (O(log n) with precomputed timestamps)
         state.regime = self._regime_classifier.classify(
             self.trade_history,
@@ -410,6 +413,8 @@ class FeatureEngine:
             features[f"ask_depth_{depth}"] = ask_depth
             features[f"depth_imbalance_{depth}"] = (bid_depth - ask_depth) / (total_depth + 1e-9)
         
+        features["abs_depth_imbalance_10"] = abs(features["depth_imbalance_10"])
+        
         # Book slope (closed-form regression, not np.polyfit)
         features["bid_slope"] = self._compute_book_slope(book.bids)
         features["ask_slope"] = self._compute_book_slope(book.asks)
@@ -498,7 +503,7 @@ class FeatureEngine:
             "spread_bps", "mid_price", "microprice", "microprice_vs_mid",
             "best_bid_size", "best_ask_size", "best_level_imbalance",
             "bid_depth_5", "ask_depth_5", "depth_imbalance_5",
-            "bid_depth_10", "ask_depth_10", "depth_imbalance_10",
+            "bid_depth_10", "ask_depth_10", "depth_imbalance_10", "abs_depth_imbalance_10",
             "bid_depth_20", "ask_depth_20", "depth_imbalance_20",
             "bid_slope", "ask_slope", "slope_asymmetry",
             "bid_pressure", "ask_pressure", "net_pressure",
@@ -535,6 +540,7 @@ class FeatureEngine:
         # Delta
         features["delta"] = buy_volume - sell_volume
         features["delta_pct"] = features["delta"] / (total_volume + 1e-9)
+        features["abs_delta_pct"] = abs(features["delta_pct"])
         features["abs_delta"] = abs(features["delta"])
         
         # Trade count
@@ -612,7 +618,7 @@ class FeatureEngine:
         """Return empty features when no trades"""
         features = {key: 0.0 for key in [
             "buy_volume", "sell_volume", "total_volume",
-            "delta", "delta_pct", "abs_delta",
+            "delta", "delta_pct", "abs_delta_pct", "abs_delta",
             "trade_count", "buy_trade_count", "sell_trade_count",
             "trade_count_imbalance", "trade_intensity",
             "avg_trade_size", "avg_buy_size", "avg_sell_size",

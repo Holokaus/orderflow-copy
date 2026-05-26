@@ -313,29 +313,38 @@ class StrategyDefinition:
         )
     
     def _determine_direction(self, state: OrderFlowState, score: float) -> SignalType:
-        """Determine signal direction from state"""
+        """Determine signal direction from state using normalized features."""
         features = state.features
-        
-        # Use delta and imbalance to determine direction
-        delta = features.get("delta_60s", 0)
+        delta_pct = features.get("delta_pct_60s", 0)
         imbalance = features.get("depth_imbalance_10", 0)
         pressure = features.get("net_pressure", 0)
         
-        bullish_score = sum([
-            delta > 0,
-            imbalance > 0.1,  # Preserve the existing noise filter threshold
-            pressure > 0
-        ])
+        directional_score = 0
         
-        if bullish_score == 3:
+        # Imbalance: use sign with magnitude thresholds
+        if abs(imbalance) > 0.1:
+            directional_score += 1 if imbalance > 0 else -1
+        if abs(imbalance) > 0.3:
+            directional_score += 1 if imbalance > 0 else -1
+        
+        # Delta: use delta_pct_60s with meaningful threshold
+        if abs(delta_pct) > 0.1:
+            directional_score += 1 if delta_pct > 0 else -1
+        
+        # Pressure: use sign with magnitude threshold
+        if abs(pressure) > 0:
+            directional_score += 1 if pressure > 0 else -1
+        
+        if directional_score >= 2:
             return SignalType.STRONG_BUY if score > self.min_score_threshold * 1.5 else SignalType.BUY
-        elif bullish_score == 2:
+        elif directional_score >= 1:
             return SignalType.BUY
-        elif bullish_score == 1:
-            return SignalType.NEUTRAL # Ambiguous — 1 of 3 indicators bullish, no clear edge
-        elif bullish_score == 0:
-            # Use score parameter for downside signals too (was unused for 0/3 case)
+        elif directional_score <= -2:
             return SignalType.STRONG_SELL if score > self.min_score_threshold * 1.5 else SignalType.SELL
+        elif directional_score <= -1:
+            return SignalType.SELL
+        else:
+            return SignalType.NEUTRAL
         
     
     def _estimate_atr(self, state: OrderFlowState, default: float = 100.0) -> float:
@@ -461,7 +470,7 @@ def create_absorption_strategy() -> StrategyDefinition:
                 param_key="abs__entry_delta_min"
             ),
             StrategyCondition(
-                feature="depth_imbalance_10",
+                feature="abs_depth_imbalance_10",
                 operator=">",
                 threshold=0.05,
                 weight=1.0,
@@ -641,9 +650,12 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
 
 def create_liquidity_sweep_strategy() -> StrategyDefinition:
     """
-    Liquidity Sweep Strategy
-    
-    Enters after a stop hunt / liquidity sweep reverses.
+    Liquidity Sweep Strategy — DISABLED
+    ======================================
+    NOTE: recent_sweep_detected fires 0.0% of ticks in XRP data.
+    This strategy produces ZERO trades. It is kept for future use
+    when sweep detection is recalibrated for low-volatility assets.
+    DO NOT include in active strategy rotation.
     """
     return StrategyDefinition(
         name="Liquidity Sweep",
@@ -747,14 +759,14 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
             ),
             # Delta confirms direction
             StrategyCondition(
-                feature="delta_pct_60s",
+                feature="abs_delta_pct_60s",
                 operator=">",
                 threshold=0.2,
                 weight=1.5
             ),
             # Book supports
             StrategyCondition(
-                feature="depth_imbalance_10",
+                feature="abs_depth_imbalance_10",
                 operator=">",
                 threshold=0.15,
                 weight=1.5

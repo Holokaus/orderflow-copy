@@ -45,7 +45,7 @@ class TradingConfig(BaseModel):
     # Risk limits
     max_daily_loss_pct: float = 0.02  # 2%
     max_drawdown_pct: float = 0.05  # 5%
-    max_consecutive_losses: int = 5
+    max_consecutive_losses: int = 20
     
     # Execution
     min_time_between_trades_sec: int = 30

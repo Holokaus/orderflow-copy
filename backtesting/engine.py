@@ -78,6 +78,8 @@ class ClosedTrade:
     duration_seconds: float
     signal_confidence: float
     risk_action: str = ""
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 @dataclass
@@ -1053,6 +1055,8 @@ class BacktestEngine:
             duration_seconds=duration,
             signal_confidence=self.position.signal.confidence,
             risk_action=self.position.risk_action,
+            stop_loss=self.position.stop_loss,
+            take_profit=self.position.take_profit,
         ))
 
         self.risk_manager.record_trade_closed(pnl)

@@ -48,8 +48,13 @@ class FeaturePrecomputer:
         # ─── Extract raw arrays ───
         prices = df["trade_price"].values.astype(np.float64)
         volumes = df["trade_size"].values.astype(np.float64)
-        bid_prices = df.get("bid_price", pd.Series(np.zeros(n))).values.astype(np.float64)
-        ask_prices = df.get("ask_price", pd.Series(np.zeros(n))).values.astype(np.float64)
+        # [FIX] Fallback to _0 columns when bid_price/ask_price missing (raw parquet data)
+        if 'bid_price' not in df.columns and 'bid_price_0' in df.columns:
+            bid_prices = df['bid_price_0'].values.astype(np.float64)
+            ask_prices = df['ask_price_0'].values.astype(np.float64)
+        else:
+            bid_prices = df.get("bid_price", pd.Series(np.zeros(n))).values.astype(np.float64)
+            ask_prices = df.get("ask_price", pd.Series(np.zeros(n))).values.astype(np.float64)
         bid_sizes = df.get("bid_size", pd.Series(np.zeros(n))).values.astype(np.float64)
         ask_sizes = df.get("ask_size", pd.Series(np.zeros(n))).values.astype(np.float64)
 

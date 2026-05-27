@@ -907,9 +907,13 @@ class BacktestEngine:
         Estimate the predicted price move based on signal TP distance or ATR + TP multiplier.
         Used by fee-aware filter to determine if signal covers trading costs.
 
+        [CHANGED 2026-05-27] _estimate_atr now returns a fraction of price (atr_pct),
+        so the formula simplifies: atr_pct * tp_mult (no more / mid_price division).
+        Previously: (atr_dollar * tp_mult) / mid_price
+
         Priority:
           1. Use signal take_profit distance when available
-          2. Fall back to ATR * tp_mult estimate
+          2. Fall back to atr_pct * tp_mult estimate
           3. Return min_profit from fee filter as absolute floor
 
         Returns:
@@ -923,8 +927,8 @@ class BacktestEngine:
         if mid_price <= 0:
             return 0.0
 
-        atr = strategy._estimate_atr(state)
-        if atr <= 0:
+        atr_pct = strategy._estimate_atr(state)
+        if atr_pct <= 0:
             return 0.0
 
         # Use the regime-appropriate take profit multiplier
@@ -936,7 +940,7 @@ class BacktestEngine:
         else:
             tp_mult = strategy.tp_mult_trending
 
-        predicted_move_pct = (atr * tp_mult) / mid_price
+        predicted_move_pct = atr_pct * tp_mult
         return predicted_move_pct
 
     # ------------------------------------------------------------------

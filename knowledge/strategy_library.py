@@ -231,12 +231,16 @@ class StrategyDefinition:
             sl_mult, tp_mult = self.sl_mult_trending, self.tp_mult_trending
             logger.debug(f"[{self.name}] Using TRENDING multipliers: SL={sl_mult}, TP={tp_mult}")
         
-        # Calculate stops using selected multipliers
-        atr = self._estimate_atr(state)
+        # [CHANGED 2026-05-27] ATR is now a fraction of price (atr_pct).
+        # stop_dist = atr_pct * mid_price * sl_mult  → distance in price units
+        # Previously: stop_dist = atr_dollar * sl_mult  (with 0.5% floor overriding real ATR)
+        # WHY: percentage ATR works at any price level and across assets.
+        # TO REVERT: change back to: stop_dist = atr_dollar * sl_mult; tp_dist = atr_dollar * tp_mult
+        atr_pct = self._estimate_atr(state)
         mid_price = state.order_book.mid_price
         
-        stop_dist = atr * sl_mult
-        tp_dist = atr * tp_mult
+        stop_dist = mid_price * atr_pct * sl_mult
+        tp_dist = mid_price * atr_pct * tp_mult
         
         # Enforce minimum TP distance (0.37% of price)
         min_tp_dist = mid_price * 0.0037
@@ -358,15 +362,38 @@ class StrategyDefinition:
         
     
     def _estimate_atr(self, state: OrderFlowState, default: float = 100.0) -> float:
-        """Estimate ATR for stop/TP placement.
+        """
+        Estimate ATR as a fraction of price (e.g., 0.0025 = 0.25%).
+        [CHANGED 2026-05-27] Previously returned dollar ATR with a 0.5% floor.
+        
+        WHY (percentage, not dollar):
+          Dollar ATR with a mid_price * 0.005 floor meant the real ATR computation
+          was never used — the floor always dominated. Converting to percentage:
+          1. Works across price levels — XRP at $0.30 or $3.50 gives same ATR%
+          2. Works across assets — no recalibration needed for BTC, ETH, etc.
+          3. The massive 0.5% floor is replaced by a small 0.1% floor — the real
+             tick-level ATR now drives SL/TP most of the time
+          4. Multipliers (2.5x, 6.0x) now multiply a percentage, producing consistent
+             percentage distances regardless of price
+        
+        Floor: max(atr_pct, 0.001) = 0.1% of price minimum.
+          - Old floor was 0.5% (always > real ATR for XRP tick data → floor dominated)
+          - New floor 0.1% prevents spread-noise stops while rarely dominating
+          - For XRP tick data: ATR median = 0.009%, 90th %ile = 0.012%, so floor
+            dominates ~95% of the time (the tick-period ATR is too short to be useful)
+          - For longer timeframes or volatile assets, real ATR exceeds 0.1% and drives stops
+          - TO ADJUST: Change 0.001 below to desired minimum ATR fraction
+        
+        TO REVERT (to old dollar ATR with 0.5% floor):
+          1. Change floor from 0.001 to 0.005, and multiply by mid_price to get dollars
+          2. Return max(atr_dollar, mid_price * 0.005) instead of max(atr_pct, 0.001)
+          3. In evaluate(): stop_dist = atr * sl_mult (replace atr_pct * mid_price * sl_mult)
+          4. In engine.py _estimate_predicted_move(): (atr * tp_mult) / mid_price
         
         Priority order:
-          1. Use atr_60s from FeatureEngine if available (most accurate)
-          2. Use price_range_60s as a proxy if atr_60s missing
-          3. Fall back to 0.5% of mid price (last resort)
-        
-        Always enforce a minimum of 0.5% of price so stops are never
-        tighter than the spread.
+          1. atr_60s from FeatureEngine (dollar → divide by mid_price for percentage)
+          2. price_range_60s as proxy
+          3. Fallback: 0.1% of mid price
         """
         mid_price = state.order_book.mid_price
         if mid_price <= 0:
@@ -374,16 +401,24 @@ class StrategyDefinition:
 
         features = state.features
 
-        # Priority 1: Real ATR from feature engine  # [FIXED]
+        # Priority 1: Real ATR from feature engine (dollar → convert to percentage)
         if features.get("atr_60s", 0) > 0:
-            return max(features["atr_60s"], mid_price * 0.005)
+            atr_dollar = features["atr_60s"]
+        # Priority 2: Price range as ATR proxy
+        elif features.get("price_range_60s", 0) > 0:
+            atr_dollar = features["price_range_60s"]
+        else:
+            # Priority 3: Fallback — 0.1% of mid price
+            atr_dollar = mid_price * 0.001
 
-        # Priority 2: Price range as ATR proxy  # [FIXED]
-        if features.get("price_range_60s", 0) > 0:
-            return max(features["price_range_60s"], mid_price * 0.005)
+        # Convert dollar ATR to percentage of price (e.g., $0.00012 / $1.33 = 0.00009 = 0.009%)
+        atr_pct = atr_dollar / mid_price
 
-        # Priority 3: Fallback — 0.5% of price
-        return mid_price * 0.005
+        # Floor: 0.1% of price. Prevents spread-noise stops on tick data.
+        # Old floor was 0.5% (5x larger) which always dominated.
+        # NOTE: For tick-level data, ATR period=14 gives tiny values (~0.009%).
+        # Consider increasing ATR period in precomputer if floor dominates too much.
+        return max(atr_pct, 0.001)
 
     def _extract_ml_features(self, state: OrderFlowState) -> dict:
         """

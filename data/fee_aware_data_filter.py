@@ -34,10 +34,10 @@ from loguru import logger
 
 @dataclass
 class FilterConfig:
-    """Configuration for historical data filtering"""
-    maker_fee_pct: float = 0.001
-    taker_fee_pct: float = 0.001
-    min_spread_pct: float = 0.0005
+    """Configuration for historical data filtering (Futures)"""
+    maker_fee_pct: float = 0.0002
+    taker_fee_pct: float = 0.0005
+    min_spread_pct: float = 0.0001
     lookforward_window_ticks: int = 100
     min_trade_duration_sec: int = 30  # Ignore very short spikes
     

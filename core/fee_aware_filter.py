@@ -26,11 +26,11 @@ from core.data_structures import Signal
 
 @dataclass
 class FeeConfig:
-    """Fee configuration for a trading pair"""
-    maker_fee_pct: float = 0.001      # 0.1% Binance spot maker
-    taker_fee_pct: float = 0.001      # 0.1% Binance spot taker
-    expected_spread_pct: float = 0.0005  # 5 bps typical spread
-    min_profit_target_pct: float = 0.001  # 10 bps minimum profit margin
+    """Fee configuration for a trading pair (Futures)"""
+    maker_fee_pct: float = 0.0002      # 0.02% Binance futures maker
+    taker_fee_pct: float = 0.0005      # 0.05% Binance futures taker
+    expected_spread_pct: float = 0.0001  # 1 bps typical spread
+    min_profit_target_pct: float = 0.0002  # 2 bps minimum profit margin
 
 
 class FeeAwareFilter:
@@ -48,10 +48,10 @@ class FeeAwareFilter:
     
     def __init__(
         self,
-        maker_fee_pct: float = 0.001,
-        taker_fee_pct: float = 0.001,
-        expected_spread_pct: float = 0.0005,
-        min_profit_target_pct: float = 0.001,
+        maker_fee_pct: float = 0.0002,
+        taker_fee_pct: float = 0.0005,
+        expected_spread_pct: float = 0.0001,
+        min_profit_target_pct: float = 0.0002,
     ):
         """
         Initialize fee-aware filter.

@@ -50,7 +50,7 @@ class TradingConfig(BaseModel):
     # Execution
     min_time_between_trades_sec: int = 30
     slippage_estimate_pct: float = 0.0005  # 0.05%
-    fee_pct: float = 0.001   # 0.1% taker (Binance spot realistic)
+    fee_pct: float = 0.0005   # 0.05% taker (Binance futures)
     
     #Add tick_size to the TradingConfig so it can be passed to the feature engine.
     tick_size: float = 0.0001  # <--- XRP typically uses 0.0001 or 0.01
@@ -193,20 +193,20 @@ class BacktestConfig(BaseModel):
 
 
 class FeeAwareFilterConfig(BaseModel):
-    """Fee-aware signal filter configuration"""
+    """Fee-aware signal filter configuration (Futures)"""
     enabled: bool = True
-    maker_fee_pct: float = 0.001
-    taker_fee_pct: float = 0.001
-    expected_spread_pct: float = 0.0005
-    min_profit_target_pct: float = 0.001
+    maker_fee_pct: float = 0.0002
+    taker_fee_pct: float = 0.0005
+    expected_spread_pct: float = 0.0001
+    min_profit_target_pct: float = 0.0002
 
 
 class DataFilteringConfig(BaseModel):
-    """Historical data pre-filtering configuration"""
+    """Historical data pre-filtering configuration (Futures)"""
     enabled: bool = True
-    maker_fee_pct: float = 0.001
-    taker_fee_pct: float = 0.001
-    min_spread_pct: float = 0.0005
+    maker_fee_pct: float = 0.0002
+    taker_fee_pct: float = 0.0005
+    min_spread_pct: float = 0.0001
     lookforward_window_ticks: int = 100
     save_filtered_copy: bool = True
 

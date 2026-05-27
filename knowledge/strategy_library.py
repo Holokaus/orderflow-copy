@@ -313,11 +313,16 @@ class StrategyDefinition:
         )
     
     def _determine_direction(self, state: OrderFlowState, score: float) -> SignalType:
-        """Determine signal direction from state using normalized features."""
+        """Determine signal direction from state using normalized features.
+        LONG-ONLY: Never returns SELL or STRONG_SELL."""
         features = state.features
         delta_pct = features.get("delta_pct_60s", 0)
         imbalance = features.get("depth_imbalance_10", 0)
         pressure = features.get("net_pressure", 0)
+        
+        # Absolute features for magnitude-based scoring [FIX 1 & 2]
+        abs_imbalance = features.get("abs_depth_imbalance_10", 0)
+        abs_delta_pct = features.get("abs_delta_pct_60s", 0)
         
         directional_score = 0
         
@@ -327,22 +332,27 @@ class StrategyDefinition:
         if abs(imbalance) > 0.3:
             directional_score += 1 if imbalance > 0 else -1
         
+        # Absolute imbalance magnitude adds conviction [FIX 3]
+        if abs_imbalance > 0.3:
+            directional_score += 1 if imbalance > 0 else -1
+        
         # Delta: use delta_pct_60s with meaningful threshold
         if abs(delta_pct) > 0.1:
             directional_score += 1 if delta_pct > 0 else -1
         
+        # Absolute delta magnitude adds conviction [FIX 3]
+        if abs_delta_pct > 0.3:
+            directional_score += 1 if delta_pct > 0 else -1
+        
         # Pressure: use sign with MEANINGFUL magnitude threshold
-        if abs(pressure) > 50000:    # ~P25 of net_pressure distribution
+        if abs(pressure) > 50000:
             directional_score += 1 if pressure > 0 else -1
         
+        # LONG-ONLY: Never return SELL/STRONG_SELL
         if directional_score >= 2:
             return SignalType.STRONG_BUY if score > self.min_score_threshold * 1.5 else SignalType.BUY
-        elif directional_score >= 1:
+        elif directional_score >= 0:
             return SignalType.BUY
-        elif directional_score <= -2:
-            return SignalType.STRONG_SELL if score > self.min_score_threshold * 1.5 else SignalType.SELL
-        elif directional_score <= -1:
-            return SignalType.SELL
         else:
             return SignalType.NEUTRAL
         
@@ -508,13 +518,13 @@ def create_absorption_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=1500.0,
+                threshold=150000.0,
                 param_key="abs__filter_bid_min"
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=1500.0,
+                threshold=150000.0,
                 param_key="abs__filter_ask_min"
             ),
         ],
@@ -616,12 +626,12 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin asks
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -698,12 +708,12 @@ def create_liquidity_sweep_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin asks
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -778,20 +788,23 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin asks
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
-            # Momentum strategy: reject calm markets (no momentum to trade)
-            # NOTE: ±0.001 (0.1%) for XRP; would need wider for BTC
+            # [FIX] Inverted: reject HIGHLY VOLATILE markets (was rejecting calm)
             StrategyCondition(
                 feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.001,
-                threshold_high=0.001
+                operator=">",
+                threshold=0.001
+            ),
+            StrategyCondition(
+                feature="price_change_pct_300s",
+                operator="<",
+                threshold=-0.001
             ),
         ],
         
@@ -870,12 +883,12 @@ def create_value_area_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=1500.0  # XRP-specific: reject thin asks
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
         ],
         

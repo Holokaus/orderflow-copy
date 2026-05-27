@@ -9,7 +9,6 @@
 *.json text eol=lf
 *.md text eol=lf
 *.py text eol=lf
-*.pyc text eol=lf
 *.html text eol=lf
 *.css text eol=lf
 *.scss text eol=lf
@@ -23,6 +22,7 @@
 *.gitignore text eol=lf
 
 # Declare binary files (no conversion)
+*.pyc binary
 *.png binary
 *.jpg binary
 *.jpeg binary

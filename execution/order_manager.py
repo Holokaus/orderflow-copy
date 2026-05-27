@@ -97,12 +97,12 @@ class OrderManager:
         self.on_fill: Optional[Callable[[Fill], None]] = None
         self.on_order_update: Optional[Callable[[Order], None]] = None
 
-        # Fee-aware filter for live/paper trading
+        # Fee-aware filter for live/paper trading (Futures fee structure)
         self.fee_filter = LiveFeeAwareFilter(
-            maker_fee_pct=0.001,
-            taker_fee_pct=0.001,
-            expected_spread_pct=0.0005,
-            min_profit_target_pct=0.001
+            maker_fee_pct=0.0002,
+            taker_fee_pct=0.0005,
+            expected_spread_pct=0.0001,
+            min_profit_target_pct=0.0002
         )
     
     def create_market_order(

@@ -61,6 +61,7 @@ class Position:
     lowest_price: float = 0.0
     trailing_stop_active: bool = False
     trailing_stop_price: float = 0.0
+    breakeven_applied: bool = False
 
 
 @dataclass
@@ -735,43 +736,39 @@ class BacktestEngine:
         else:
             self.position.lowest_price = min(self.position.lowest_price, mid)
 
+        # Breakeven stop: if unrealized PnL > 0.15%, move SL to entry + total fees (0.10%)
+        if not self.position.breakeven_applied and self.position.side == Side.BUY:
+            notional = self.position.entry_price * self.position.size
+            pnl_pct = self.position.unrealized_pnl / (notional + 1e-9)
+            if pnl_pct > 0.0015:
+                breakeven_price = self.position.entry_price * 1.001
+                if breakeven_price > self.position.stop_loss:
+                    old_sl = self.position.stop_loss
+                    self.position.stop_loss = breakeven_price
+                    self.position.breakeven_applied = True
+
     def _update_trailing_stop(self, state: OrderFlowState) -> None:
-        """Activate and ratchet trailing stop."""
-        if not self.position:
+        """Trailing stop: tracks MFE and ratchets SL up on every tick.
+        
+        Activation: MFE > 0.30% above entry (for LONGs).
+        Trail distance: 0.15% below highest price seen.
+        SL can only move UP.
+        """
+        if not self.position or self.position.side != Side.BUY:
             return
 
-        book = state.order_book
-        activation = self.position.trailing_stop_activation_pct
-        if activation <= 0:
-            return
+        # Use highest_price (already tracked in _update_position) as MFE
+        mfe = self.position.highest_price
+        entry = self.position.entry_price
+        mfe_pct = (mfe - entry) / (entry + 1e-9)
 
-        if self.position.side == Side.BUY:
-            mark = book.best_bid.price if book.best_bid else book.mid_price
-            move_pct = (mark - self.position.entry_price) / self.position.entry_price
-            if move_pct >= activation:
-                self.position.trailing_stop_active = True
-                trail_distance = activation * 0.5
-                new_stop = mark * (1 - trail_distance)
-                self.position.trailing_stop_price = max(
-                    self.position.trailing_stop_price, new_stop
-                )
-                if self.position.trailing_stop_price > self.position.stop_loss:
-                    self.position.stop_loss = self.position.trailing_stop_price
-        else:
-            mark = book.best_ask.price if book.best_ask else book.mid_price
-            move_pct = (self.position.entry_price - mark) / self.position.entry_price
-            if move_pct >= activation:
-                self.position.trailing_stop_active = True
-                trail_distance = activation * 0.5
-                new_stop = mark * (1 + trail_distance)
-                if self.position.trailing_stop_price <= 0:
-                    self.position.trailing_stop_price = new_stop
-                else:
-                    self.position.trailing_stop_price = min(
-                        self.position.trailing_stop_price, new_stop
-                    )
-                if self.position.trailing_stop_price < self.position.stop_loss:
-                    self.position.stop_loss = self.position.trailing_stop_price
+        # Activate trailing when MFE exceeds 0.30%
+        if mfe_pct > 0.003:
+            self.position.trailing_stop_active = True
+            # Trail at 0.15% below MFE
+            new_stop = mfe * (1 - 0.0015)
+            if new_stop > self.position.stop_loss:
+                self.position.stop_loss = new_stop
 
     # ------------------------------------------------------------------
     # Exit conditions
@@ -808,12 +805,28 @@ class BacktestEngine:
             exit_check_price = book.best_ask.price if book.best_ask else book.mid_price
 
         # 1) Hard stop loss (always active, no minimum hold required)
+        # NOTE: signal SL distances are often near-0% on tick data (ATR ~0).
+        # We use a 0.5% max-loss floor from entry. If breakeven/trailing has
+        # moved SL above entry, we honor that tighter protection instead.
+        max_loss_pct = 0.005  # 0.5% max loss from entry
         if self.position.side == Side.BUY:
-            if exit_check_price <= self.position.stop_loss:
-                return "stop_loss"
+            if self.position.stop_loss > self.position.entry_price:
+                # Breakeven/trailing moved SL up — honor it
+                if exit_check_price <= self.position.stop_loss:
+                    return "stop_loss"
+            else:
+                # Signal SL may be too tight — use max loss floor
+                loss_pct = (self.position.entry_price - exit_check_price) / self.position.entry_price
+                if loss_pct >= max_loss_pct:
+                    return "stop_loss"
         else:
-            if exit_check_price >= self.position.stop_loss:
-                return "stop_loss"
+            if self.position.stop_loss < self.position.entry_price:
+                if exit_check_price >= self.position.stop_loss:
+                    return "stop_loss"
+            else:
+                loss_pct = (exit_check_price - self.position.entry_price) / self.position.entry_price
+                if loss_pct >= max_loss_pct:
+                    return "stop_loss"
 
         # 2) Take profit (always active, no minimum hold required)
         if self.position.side == Side.BUY:
@@ -823,73 +836,27 @@ class BacktestEngine:
             if exit_check_price <= self.position.take_profit:
                 return "take_profit"
 
-        # 3a) Absorption against (requires minimum hold)
-        if flow_exits_allowed and state.absorptions:
+        # 3) Absorption against — ONLY if strength > 0.80 AND position is profitable
+        # (protects gains without killing trades that haven't moved yet)
+        if flow_exits_allowed and state.absorptions and self.position.unrealized_pnl > 0:
             latest_abs = state.absorptions[-1]
 
             # Long position exits when BUYERS are absorbed = Resistance forming overhead
-            # (passive sellers are absorbing aggressive buyers = price ceiling)
-            # Do NOT exit when SELLERS are absorbed — that is Support, which helps Longs
             if (self.position.side == Side.BUY and
                     latest_abs.absorbing_side == Side.BUY and
-                    latest_abs.strength >= 0.6):  # [FIXED] was Side.SELL
+                    latest_abs.strength >= 0.80):
                 return "absorption_against"
 
             # Short position exits when SELLERS are absorbed = Support forming below
-            # (passive buyers are absorbing aggressive sellers = price floor)
-            # Do NOT exit when BUYERS are absorbed — that is Resistance, which helps Shorts
             if (self.position.side == Side.SELL and
                     latest_abs.absorbing_side == Side.SELL and
-                    latest_abs.strength >= 0.6):  # [FIXED] was Side.BUY
+                    latest_abs.strength >= 0.80):
                 return "absorption_against"
 
-        # 3b) Delta divergence against (check divergence direction, requires minimum hold)
-        if flow_exits_allowed:
-            delta_div = features.get("delta_divergence_60s", 0)
-            if delta_div == 1.0:
-                price_dir_60 = np.sign(features.get("price_change_pct_60s", 0))
-                delta_dir_60 = np.sign(features.get("delta_pct_60s", 0))
-                # Bearish divergence: price up, delta down → exit long
-                if self.position.side == Side.BUY and price_dir_60 > 0 and delta_dir_60 < 0:
-                    return "delta_divergence_against"
-                # Bullish divergence: price down, delta up → exit short
-                if self.position.side == Side.SELL and price_dir_60 < 0 and delta_dir_60 > 0:
-                    return "delta_divergence_against"
-
-        # 3c) Exhaustion (requires minimum hold)
-        if flow_exits_allowed:
-            if self.position.side == Side.BUY:
-                if features.get("buying_exhaustion", 0) >= 1.0:
-                    return "buying_exhaustion"
-            else:
-                if features.get("selling_exhaustion", 0) >= 1.0:
-                    return "selling_exhaustion"
-
-        # 3d) Sweep against (requires minimum hold)
-        if flow_exits_allowed and state.sweeps:
-            latest_sweep = state.sweeps[-1]
-            if (self.position.side == Side.BUY and
-                    latest_sweep.direction == Side.SELL and
-                    latest_sweep.reversal_strength < 0.4):
-                return "sweep_against_long"
-            if (self.position.side == Side.SELL and
-                    latest_sweep.direction == Side.BUY and
-                    latest_sweep.reversal_strength < 0.4):
-                return "sweep_against_short"
-
-        # 3e) Book pressure collapse (requires minimum hold)
-        if flow_exits_allowed:
-            net_pressure = features.get("net_pressure", 0)
-            if self.position.side == Side.BUY and net_pressure < -0.5:
-                bid_depth = features.get("bid_depth_10", 0)
-                ask_depth = features.get("ask_depth_10", 0)
-                if ask_depth > 0 and bid_depth / (ask_depth + 1e-9) < 0.3:
-                    return "book_pressure_collapse"
-            if self.position.side == Side.SELL and net_pressure > 0.5:
-                bid_depth = features.get("bid_depth_10", 0)
-                ask_depth = features.get("ask_depth_10", 0)
-                if bid_depth > 0 and ask_depth / (bid_depth + 1e-9) < 0.3:
-                    return "book_pressure_collapse"
+        # [DISABLED] Delta divergence — tick-level sign mismatch is noise, not a reversal signal
+        # [DISABLED] Buying/selling exhaustion — single-bar micro structure is normal market breathing
+        # [DISABLED] Sweep against — tick-level sweeps are too frequent and unreliable
+        # [DISABLED] Book pressure collapse — fleeting imbalances on tick data are meaningless
 
         return None
 

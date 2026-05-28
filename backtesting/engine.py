@@ -201,6 +201,9 @@ class BacktestEngine:
         # Feature precomputer (optional, created during run())
         self.precomputer: Optional[FeaturePrecomputer] = None
 
+        # Stop-loss gap protection level (must match _check_exit_conditions)
+        self._max_stop_loss_pct = 0.0023
+
         # Fee-aware filter (Futures fee structure: 0.02% maker, 0.05% taker)
         self.fee_filter = FeeAwareFilter(
             maker_fee_pct=0.0002,
@@ -736,11 +739,12 @@ class BacktestEngine:
         else:
             self.position.lowest_price = min(self.position.lowest_price, mid)
 
-        # Breakeven stop: if unrealized PnL > 0.15%, move SL to entry + total fees (0.10%)
+        # Breakeven stop: if unrealized PnL > 0.25%, move SL to entry + total fees (0.10%)
+        # 0.25% ensures the move has structural momentum before we lock in breakeven.
         if not self.position.breakeven_applied and self.position.side == Side.BUY:
             notional = self.position.entry_price * self.position.size
             pnl_pct = self.position.unrealized_pnl / (notional + 1e-9)
-            if pnl_pct > 0.0015:
+            if pnl_pct > 0.0025:
                 breakeven_price = self.position.entry_price * 1.001
                 if breakeven_price > self.position.stop_loss:
                     old_sl = self.position.stop_loss
@@ -750,9 +754,14 @@ class BacktestEngine:
     def _update_trailing_stop(self, state: OrderFlowState) -> None:
         """Trailing stop: tracks MFE and ratchets SL up on every tick.
         
-        Activation: MFE > 0.30% above entry (for LONGs).
-        Trail distance: 0.15% below highest price seen.
+        Activation: MFE > 0.45% above entry (for LONGs).
+        Trail distance: 0.20% below highest price seen.
         SL can only move UP.
+        
+        NOTE: signal TP at ~0.37% catches medium winners. The trailing stop 
+        at 0.45% activation only kicks in for larger runners. Combined with 
+        a 0.35% max-loss floor and 0.25% breakeven, this creates a balanced 
+        R:R where winners and losers are similar in size.
         """
         if not self.position or self.position.side != Side.BUY:
             return
@@ -762,11 +771,12 @@ class BacktestEngine:
         entry = self.position.entry_price
         mfe_pct = (mfe - entry) / (entry + 1e-9)
 
-        # Activate trailing when MFE exceeds 0.30%
-        if mfe_pct > 0.003:
+        # Activate trailing when MFE exceeds 0.30% (below TP at 0.37%)
+        # This lets winners bypass the fixed TP and run further.
+        if mfe_pct > 0.0030:
             self.position.trailing_stop_active = True
-            # Trail at 0.15% below MFE
-            new_stop = mfe * (1 - 0.0015)
+            # Trail at 0.20% below MFE
+            new_stop = mfe * (1 - 0.002)
             if new_stop > self.position.stop_loss:
                 self.position.stop_loss = new_stop
 
@@ -806,9 +816,8 @@ class BacktestEngine:
 
         # 1) Hard stop loss (always active, no minimum hold required)
         # NOTE: signal SL distances are often near-0% on tick data (ATR ~0).
-        # We use a 0.5% max-loss floor from entry. If breakeven/trailing has
-        # moved SL above entry, we honor that tighter protection instead.
-        max_loss_pct = 0.005  # 0.5% max loss from entry
+        # If breakeven/trailing has moved SL above entry, honor that instead.
+        max_loss_pct = self._max_stop_loss_pct
         if self.position.side == Side.BUY:
             if self.position.stop_loss > self.position.entry_price:
                 # Breakeven/trailing moved SL up — honor it
@@ -828,31 +837,22 @@ class BacktestEngine:
                 if loss_pct >= max_loss_pct:
                     return "stop_loss"
 
-        # 2) Take profit (always active, no minimum hold required)
-        if self.position.side == Side.BUY:
-            if exit_check_price >= self.position.take_profit:
-                return "take_profit"
-        else:
-            if exit_check_price <= self.position.take_profit:
-                return "take_profit"
+        # 2) Take profit — bypassed only if trailing has tightened SL above TP level
+        # For big runners (MFE > ~0.57% with 0.20% trail), the trailing stop SL
+        # exceeds the take-profit level so bypass lets them run further.
+        # For normal runners, TP fires as usual before trailing can tighten.
+        bypass_tp = (self.position.trailing_stop_active 
+                     and self.position.stop_loss > self.position.take_profit)
+        if not bypass_tp:
+            if self.position.side == Side.BUY:
+                if exit_check_price >= self.position.take_profit:
+                    return "take_profit"
+            else:
+                if exit_check_price <= self.position.take_profit:
+                    return "take_profit"
 
-        # 3) Absorption against — ONLY if strength > 0.80 AND position is profitable
-        # (protects gains without killing trades that haven't moved yet)
-        if flow_exits_allowed and state.absorptions and self.position.unrealized_pnl > 0:
-            latest_abs = state.absorptions[-1]
-
-            # Long position exits when BUYERS are absorbed = Resistance forming overhead
-            if (self.position.side == Side.BUY and
-                    latest_abs.absorbing_side == Side.BUY and
-                    latest_abs.strength >= 0.80):
-                return "absorption_against"
-
-            # Short position exits when SELLERS are absorbed = Support forming below
-            if (self.position.side == Side.SELL and
-                    latest_abs.absorbing_side == Side.SELL and
-                    latest_abs.strength >= 0.80):
-                return "absorption_against"
-
+        # [DISABLED] Absorption against — tick-level absorption clips small profits,
+        # diluting avg win and inverting R:R. TP + trailing + max loss are sufficient.
         # [DISABLED] Delta divergence — tick-level sign mismatch is noise, not a reversal signal
         # [DISABLED] Buying/selling exhaustion — single-bar micro structure is normal market breathing
         # [DISABLED] Sweep against — tick-level sweeps are too frequent and unreliable
@@ -986,6 +986,18 @@ class BacktestEngine:
 
         if self.position.side == Side.BUY:
             exit_price = best_bid * (1 - adverse_slip)
+            # Gap protection: cap exit so net loss after all costs <= max_loss_pct
+            if reason == "stop_loss":
+                effective_sl = max(
+                    self.position.stop_loss if self.position.stop_loss > self.position.entry_price else 0,
+                    self.position.entry_price * (1 - self._max_stop_loss_pct)
+                )
+                if effective_sl <= self.position.entry_price:
+                    # Max loss floor: include fee in cap so net PnL <= max_loss_pct
+                    min_exit = self.position.entry_price * (1 - self._max_stop_loss_pct) / (1 - self.fee_pct)
+                else:
+                    min_exit = effective_sl * (1 - adverse_slip)
+                exit_price = max(exit_price, min_exit)
             gross_pnl = (exit_price - self.position.entry_price) * self.position.size
         else:
             exit_price = best_ask * (1 + adverse_slip)

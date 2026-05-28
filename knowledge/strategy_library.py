@@ -646,6 +646,12 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
         ],
         
         filters=[
+            # LONG-ONLY trend filter: reject entries when price is significantly below VWAP
+            StrategyCondition(
+                feature="price_vs_vwap_pct",
+                operator="<",
+                threshold=-0.002
+            ),
             # Don't fight strong momentum
             StrategyCondition(
                 feature="delta_pct_300s",
@@ -734,11 +740,17 @@ def create_liquidity_sweep_strategy() -> StrategyDefinition:
         ],
         
         filters=[
+            # LONG-ONLY trend filter: reject entries when price is significantly below VWAP
+            StrategyCondition(
+                feature="price_vs_vwap_pct",
+                operator="<",
+                threshold=-0.002
+            ),
             # FIX 4: Market filters - reject bad market environments
             StrategyCondition(
                 feature="spread_bps",
                 operator=">",
-                threshold=8.0  # Reject wide spreads
+                threshold=15.0  # Reject wide spreads
             ),
             StrategyCondition(
                 feature="bid_depth_10",
@@ -814,6 +826,12 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
         ],
         
         filters=[
+            # LONG-ONLY trend filter: reject entries when price is significantly below VWAP
+            StrategyCondition(
+                feature="price_vs_vwap_pct",
+                operator="<",
+                threshold=-0.002
+            ),
             # FIX 4: Market filters - reject bad market environments
             StrategyCondition(
                 feature="spread_bps",
@@ -903,6 +921,12 @@ def create_value_area_strategy() -> StrategyDefinition:
         ],
         
         filters=[
+            # LONG-ONLY trend filter: reject entries when price is significantly below VWAP
+            StrategyCondition(
+                feature="price_vs_vwap_pct",
+                operator="<",
+                threshold=-0.002
+            ),
             # Don't fade strong momentum
             StrategyCondition(
                 feature="trade_intensity_60s",

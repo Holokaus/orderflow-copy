@@ -167,8 +167,8 @@ class BacktestEngine:
     EQUITY_SAMPLE_EVERY_N = 50
     VOLUME_PROFILE_EVERY_N = 100
 
-    # Minimum hold before flow-based exits can fire (5 minutes)
-    MIN_HOLD_BEFORE_FLOW_EXIT_SEC = 300
+    # Minimum hold before flow-based exits can fire (20 minutes)
+    MIN_HOLD_BEFORE_FLOW_EXIT_SEC = 1200
 
     def __init__(
         self,
@@ -823,49 +823,12 @@ class BacktestEngine:
             if exit_check_price <= self.position.take_profit:
                 return "take_profit"
 
-        # 3a) Absorption against (requires minimum hold)
-        if flow_exits_allowed and state.absorptions:
-            latest_abs = state.absorptions[-1]
+        # [DISABLED] 3a) Absorption against
+        # [DISABLED] 3b) Delta divergence against
 
-            # Long position exits when BUYERS are absorbed = Resistance forming overhead
-            # (passive sellers are absorbing aggressive buyers = price ceiling)
-            # Do NOT exit when SELLERS are absorbed — that is Support, which helps Longs
-            if (self.position.side == Side.BUY and
-                    latest_abs.absorbing_side == Side.BUY and
-                    latest_abs.strength >= 0.6):  # [FIXED] was Side.SELL
-                return "absorption_against"
+        # [DISABLED] 3c) Exhaustion
 
-            # Short position exits when SELLERS are absorbed = Support forming below
-            # (passive buyers are absorbing aggressive sellers = price floor)
-            # Do NOT exit when BUYERS are absorbed — that is Resistance, which helps Shorts
-            if (self.position.side == Side.SELL and
-                    latest_abs.absorbing_side == Side.SELL and
-                    latest_abs.strength >= 0.6):  # [FIXED] was Side.BUY
-                return "absorption_against"
-
-        # 3b) Delta divergence against (check divergence direction, requires minimum hold)
-        if flow_exits_allowed:
-            delta_div = features.get("delta_divergence_60s", 0)
-            if delta_div == 1.0:
-                price_dir_60 = np.sign(features.get("price_change_pct_60s", 0))
-                delta_dir_60 = np.sign(features.get("delta_pct_60s", 0))
-                # Bearish divergence: price up, delta down → exit long
-                if self.position.side == Side.BUY and price_dir_60 > 0 and delta_dir_60 < 0:
-                    return "delta_divergence_against"
-                # Bullish divergence: price down, delta up → exit short
-                if self.position.side == Side.SELL and price_dir_60 < 0 and delta_dir_60 > 0:
-                    return "delta_divergence_against"
-
-        # 3c) Exhaustion (requires minimum hold)
-        if flow_exits_allowed:
-            if self.position.side == Side.BUY:
-                if features.get("buying_exhaustion", 0) >= 1.0:
-                    return "buying_exhaustion"
-            else:
-                if features.get("selling_exhaustion", 0) >= 1.0:
-                    return "selling_exhaustion"
-
-        # 3d) Sweep against (requires minimum hold)
+        # 3c) Sweep against (requires minimum hold)
         if flow_exits_allowed and state.sweeps:
             latest_sweep = state.sweeps[-1]
             if (self.position.side == Side.BUY and
@@ -877,7 +840,7 @@ class BacktestEngine:
                     latest_sweep.reversal_strength < 0.4):
                 return "sweep_against_short"
 
-        # 3e) Book pressure collapse (requires minimum hold)
+        # 3d) Book pressure collapse (requires minimum hold)
         if flow_exits_allowed:
             net_pressure = features.get("net_pressure", 0)
             if self.position.side == Side.BUY and net_pressure < -0.5:

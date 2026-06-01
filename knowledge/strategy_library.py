@@ -525,7 +525,7 @@ def create_absorption_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="price_vs_poc_pct",
                 operator="between",
-                threshold=-0.005,  # Will be overridden by optimizer via param_key
+                threshold=-0.005,
                 threshold_high=0.005,
                 weight=0.5,
                 param_key="abs__entry_poc_range"
@@ -534,55 +534,46 @@ def create_absorption_strategy() -> StrategyDefinition:
                 feature="book_trade_agreement",
                 operator="==",
                 threshold=1.0,
-                weight=1.5,       # High weight — strongly preferred but not required
-                required=False,   # NOT required: early absorption entries lag trade flow
-                                  # Making it required would filter out the best entries
-                param_key="abs__entry_agreement"   # Exposed to optimizer  # [FIXED]
+                weight=1.5,
+                required=False,
+                param_key="abs__entry_agreement"
             ),
         ],
         
         filters=[
-            # Spread filter: REJECT if spread > threshold
             StrategyCondition(
                 feature="spread_bps",
                 operator=">",
-                threshold=15.0,
-                param_key="abs__filter_spread_max"
+                threshold=15.0
             ),
-            # Depth filters: REJECT if depth < threshold (illiquidity protection)
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=150000.0,
-                param_key="abs__filter_bid_min"
+                threshold=5000.0
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=150000.0,
-                param_key="abs__filter_ask_min"
+                threshold=5000.0
             ),
         ],
         
         min_conditions_satisfied=2,
         min_score_threshold=2.5,
         
-        # Base risk parameters (optimizer can override via param_keys below)
-        stop_loss_atr_mult=2.5,
-        take_profit_atr_mult=6.0,
-        trailing_stop_activation_pct=0.005,
-        
-        # CRITICAL: Regime-specific multipliers exposed to optimizer
-        sl_mult_high_vol=3.5,
-        sl_mult_low_vol=1.8,
-        sl_mult_trending=2.5,
-        tp_mult_high_vol=7.0,
-        tp_mult_low_vol=2.5,
-        tp_mult_trending=5.0,
-        
+        # [ICP-OPT] Trailing stop exits (SL=0.7%, trail activates at +1.0%)
+        sl_mult_high_vol=7.0,
+        sl_mult_low_vol=7.0,
+        sl_mult_trending=7.0,
+        tp_mult_high_vol=100.0,
+        tp_mult_low_vol=100.0,
+        tp_mult_trending=100.0,
+        trailing_stop_activation_pct=0.01,
+
         allowed_regimes=[
             Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION, 
-            Regime.TRENDING_UP, Regime.TRENDING_DOWN
+            Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.BREAKOUT,
+            Regime.HIGH_VOLATILITY, Regime.LOW_LIQUIDITY
         ]
     )
 
@@ -818,37 +809,44 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="spread_bps",
                 operator=">",
-                threshold=8.0  # Reject wide spreads
+                threshold=15.0  # Reject wide spreads (>15bps)
             ),
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=150000.0  # XRP-specific: reject thin bids
+                threshold=5000.0  # Reject thin bids (<5000 total)
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=150000.0  # XRP-specific: reject thin asks
+                threshold=5000.0  # Reject thin asks (<5000 total)
             ),
-            # [FIX] Inverted: reject HIGHLY VOLATILE markets (was rejecting calm)
+            # [FIX] Reject extreme volatility only (>5% in 5min)
             StrategyCondition(
                 feature="price_change_pct_300s",
                 operator=">",
-                threshold=0.001
+                threshold=0.05
             ),
             StrategyCondition(
                 feature="price_change_pct_300s",
                 operator="<",
-                threshold=-0.001
+                threshold=-0.05
             ),
         ],
         
         min_conditions_satisfied=2,
         min_score_threshold=2.5,
-        # FIX 2: 3:1 risk/reward ratio
-        stop_loss_atr_mult=2.0,
-        take_profit_atr_mult=6.0,
-        allowed_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.BREAKOUT, Regime.ACCUMULATION, Regime.DISTRIBUTION] #Add Regime.ACCUMULATION, Regime.DISTRIBUTION
+        # ICP-optimized: trailing stop with wide SL (fee+slippage ~0.16%/side)
+        sl_mult_high_vol=7.0,
+        sl_mult_low_vol=7.0,
+        sl_mult_trending=7.0,
+        tp_mult_high_vol=100.0,
+        tp_mult_low_vol=100.0,
+        tp_mult_trending=100.0,
+        trailing_stop_activation_pct=0.01,
+        base_position_pct=0.95,
+        scale_with_score=False,
+        max_position_pct=0.95,
     )
 
 

@@ -36,7 +36,7 @@ class RiskLimits:
     max_trades_per_day: int = 50
     max_trades_per_hour: int = 10
     min_time_between_trades_sec: int = 30
-    max_consecutive_losses: int = 20
+    max_consecutive_losses: int = 5
     
     # Exposure limits
     max_correlated_positions: int = 3
@@ -96,12 +96,9 @@ class RiskManager:
         
         self._reset_daily_tracking()
     
-    def _reset_daily_tracking(self, current_timestamp: Optional[datetime] = None):
-        """Reset daily counters using backtest timestamp (not wall-clock)"""
-        now = current_timestamp or datetime.now()
-        # Strip timezone info to avoid offset-naive/offset-aware comparison errors
-        if hasattr(now, 'tzinfo') and now.tzinfo is not None:
-            now = now.replace(tzinfo=None)
+    def _reset_daily_tracking(self):
+        """Reset daily counters"""
+        now = datetime.now()
         
         if self.state.day_start is None or now.date() > self.state.day_start.date():
             self.state.day_start = now.replace(hour=0, minute=0, second=0)
@@ -116,14 +113,14 @@ class RiskManager:
             self.state.hour_start = now
             self.state.trades_this_hour = 0
     
-    def check_signal(self, signal: Signal, current_price: float, current_timestamp: Optional[datetime] = None) -> tuple:
+    def check_signal(self, signal: Signal, current_price: float) -> tuple:
         """
         Check if a signal passes all risk checks.
         
         Returns:
             (RiskAction, adjusted_signal or None, reason)
         """
-        self._reset_daily_tracking(current_timestamp)
+        self._reset_daily_tracking()
         
         # Check if trading is halted
         if self.state.trading_halted:
@@ -158,11 +155,8 @@ class RiskManager:
             return (RiskAction.REJECT, None, "Hourly trade limit reached")
         
         # Check minimum time between trades
-        if self.state.last_trade_time and current_timestamp:
-            ts = current_timestamp
-            if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
-                ts = ts.replace(tzinfo=None)
-            seconds_since_last = (ts - self.state.last_trade_time).total_seconds()
+        if self.state.last_trade_time:
+            seconds_since_last = (datetime.now() - self.state.last_trade_time).total_seconds()
             if seconds_since_last < self.limits.min_time_between_trades_sec:
                 return (RiskAction.REJECT, None, "Too soon since last trade")
         
@@ -215,12 +209,9 @@ class RiskManager:
         
         return adjusted
     
-    def record_trade_opened(self, entry_price: float, size: float, side: Side, current_timestamp: Optional[datetime] = None):
+    def record_trade_opened(self, entry_price: float, size: float, side: Side):
         """Record that a trade was opened"""
-        ts = current_timestamp or datetime.now()
-        if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
-            ts = ts.replace(tzinfo=None)
-        self.state.last_trade_time = ts
+        self.state.last_trade_time = datetime.now()
         self.state.trades_today += 1
         self.state.trades_this_hour += 1
         

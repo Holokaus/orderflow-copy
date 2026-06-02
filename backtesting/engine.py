@@ -30,8 +30,6 @@ from core.data_structures import (
     OrderBook, PriceLevel, FootprintBar, Regime
 )
 from core.feature_engine import FeatureEngine, FeatureConfig
-from core.fee_aware_filter import FeeAwareFilter
-from core.feature_precomputer import FeaturePrecomputer
 from knowledge.strategy_library import StrategyDefinition
 from execution.risk_manager import RiskManager, RiskLimits, RiskAction
 
@@ -78,8 +76,6 @@ class ClosedTrade:
     duration_seconds: float
     signal_confidence: float
     risk_action: str = ""
-    stop_loss: float | None = None
-    take_profit: float | None = None
 
 
 @dataclass
@@ -114,7 +110,6 @@ class BacktestMetrics:
     signals_reduced_by_risk: int = 0
     halts_triggered: int = 0
     suspicious_pnl_rejected: int = 0
-    signals_rejected_by_fee_filter: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -167,19 +162,16 @@ class BacktestEngine:
     EQUITY_SAMPLE_EVERY_N = 50
     VOLUME_PROFILE_EVERY_N = 100
 
-    # Minimum hold before flow-based exits can fire (20 minutes)
-    MIN_HOLD_BEFORE_FLOW_EXIT_SEC = 1200
-
     def __init__(
         self,
         initial_capital: float = 100_000.0,
-        fee_pct: float = 0.0005,
-        slippage_pct: float = 0.0003,
+        fee_pct: float = 0.0004,
+        slippage_pct: float = 0.0005,
         sl_extra_slippage_pct: float = 0.0003,
         warmup_seconds: float = 60.0,
         min_time_between_trades_sec: float = 30.0,
         equity_floor_pct: float = 0.50,
-        suspicious_pnl_pct: float = 0.30,
+        suspicious_pnl_pct: float = 0.10,
         risk_limits: Optional[RiskLimits] = None,
         feature_config: Optional[FeatureConfig] = None,  # NEW: accept config
     ):
@@ -195,18 +187,6 @@ class BacktestEngine:
 
         # FIX: Store feature config for creating FeatureEngine
         self._feature_config = feature_config or FeatureConfig()
-        self.windows = self._feature_config.windows
-
-        # Feature precomputer (optional, created during run())
-        self.precomputer: Optional[FeaturePrecomputer] = None
-
-        # Fee-aware filter (Futures fee structure: 0.02% maker, 0.05% taker)
-        self.fee_filter = FeeAwareFilter(
-            maker_fee_pct=0.0002,
-            taker_fee_pct=0.0005,
-            expected_spread_pct=0.0001,
-            min_profit_target_pct=0.0002
-        )
 
         self.risk_limits = risk_limits or RiskLimits(
             max_position_size=10000.0, #1.0 for BTC change to 10000 for XRP
@@ -217,7 +197,7 @@ class BacktestEngine:
             max_trades_per_day=50,
             max_trades_per_hour=10,
             min_time_between_trades_sec=int(min_time_between_trades_sec),
-            max_consecutive_losses=20,
+            max_consecutive_losses=5,
         )
 
         # State (initialized in reset())
@@ -238,7 +218,6 @@ class BacktestEngine:
         self._signals_reduced = 0
         self._halts = 0
         self._suspicious_rejected = 0
-        self._signals_rejected_by_fee_filter = 0
 
     def reset(self) -> None:
         """Reset state for new backtest."""
@@ -262,7 +241,6 @@ class BacktestEngine:
         self._signals_reduced = 0
         self._halts = 0
         self._suspicious_rejected = 0
-        self._signals_rejected_by_fee_filter = 0
         self._entry_tick_idx: int = -1  # [FIXED] Track entry tick to prevent same-tick exits
         self._current_tick_idx: int = -1  # [FIXED] Track current tick for entry-tick guard
 
@@ -274,33 +252,15 @@ class BacktestEngine:
     def _preprocess(data: pd.DataFrame) -> List[_Row]:
         """Convert DataFrame to lightweight _Row objects."""
         
-        # === FIX: ALWAYS Map _0 columns to base columns ===
-        # - If base columns don't exist, copy from _0
-        # - If base columns exist but are all zeros/NaN, replace with _0
-        if 'bid_price_0' in data.columns:
+        # === FIX: Map _0 columns to base columns ===
+        # (Because we dropped the redundant ones in the Parquet conversion)
+        if 'bid_price' not in data.columns and 'bid_price_0' in data.columns:
             data = data.copy()
-            
-            # Check if bid_price is invalid (missing, all zeros, or all NaN)
-            if 'bid_price' not in data.columns or \
-               (data['bid_price'].fillna(0) == 0).all() or \
-               data['bid_price'].isna().all():
-                data['bid_price'] = data['bid_price_0']
-                
-            if 'ask_price' not in data.columns or \
-               (data['ask_price'].fillna(0) == 0).all() or \
-               data['ask_price'].isna().all():
-                data['ask_price'] = data['ask_price_0']
-                
-            if 'bid_size' not in data.columns or \
-               (data['bid_size'].fillna(0) == 0).all() or \
-               data['bid_size'].isna().all():
-                data['bid_size'] = data['bid_size_0']
-                
-            if 'ask_size' not in data.columns or \
-               (data['ask_size'].fillna(0) == 0).all() or \
-               data['ask_size'].isna().all():
-                data['ask_size'] = data['ask_size_0']
-        # ========================================================
+            data['bid_price'] = data['bid_price_0']
+            data['ask_price'] = data['ask_price_0']
+            data['bid_size'] = data['bid_size_0']
+            data['ask_size'] = data['ask_size_0']
+        # ============================================
         
         timestamps = pd.to_datetime(data['timestamp']).dt.to_pydatetime()
 
@@ -391,10 +351,6 @@ class BacktestEngine:
         n_rows = len(rows)
         logger.debug(f"Running backtest with {n_rows} data points")
         
-        # Precompute features before loop (massive speedup)
-        self.precomputer = FeaturePrecomputer(windows=self.windows)
-        self.precomputer.precompute_all(data)
-        
         # DEPTH CHECK - Verify data loading
         if len(rows) > 0:
             sample = rows[0]
@@ -447,13 +403,10 @@ class BacktestEngine:
             run_patterns = (tick_idx % pattern_every == 0)
             run_vp = (tick_idx % vp_every == 0)
 
-            precomputed = self.precomputer.get_features_for_tick(tick_idx) if self.precomputer else None
-
             state = self.feature_engine.update(
                 order_book, trades,
                 detect_patterns=run_patterns,
                 compute_volume_profile=run_vp,
-                precomputed_features=precomputed,
             )
 
             # FIX: REMOVED state.regime override — FeatureEngine's classifier is used
@@ -485,19 +438,13 @@ class BacktestEngine:
                 signal = strategy.evaluate(state)
 
                 if signal and signal.is_actionable:
-                    # LONG-ONLY gate: reject SELL/STRONG_SELL signals
-                    if signal.signal_type in (SignalType.SELL, SignalType.STRONG_SELL):
-                        if tick_idx % equity_every == 0:
-                            self.equity_curve.append((timestamp, self._calculate_equity_fast()))
-                        continue
-
                     if self._is_duplicate_signal(signal, strategy, timestamp):
                         if tick_idx % equity_every == 0:
                             self.equity_curve.append((timestamp, self._calculate_equity_fast()))
                         continue
 
                     risk_action, adjusted_signal, reason = self.risk_manager.check_signal(
-                        signal, state.order_book.mid_price, timestamp
+                        signal, state.order_book.mid_price
                     )
 
                     if risk_action == RiskAction.HALT_TRADING:
@@ -506,26 +453,7 @@ class BacktestEngine:
                     elif risk_action == RiskAction.REJECT:
                         self._signals_rejected += 1
                         continue
-
-                    # Fee-aware filter check (before opening position)
-                    signal_to_check = adjusted_signal or signal
-                    # Use actual signal TP distance when available, not ATR estimate [FIX 5 & 7]
-                    if signal_to_check.entry_price > 0 and signal_to_check.take_profit != signal_to_check.entry_price:
-                        predicted_move_pct = abs(signal_to_check.take_profit - signal_to_check.entry_price) / signal_to_check.entry_price
-                    else:
-                        predicted_move_pct = self._estimate_predicted_move(state, strategy, signal_to_check)
-                    if predicted_move_pct > 0:
-                        should_ignore, fee_reason = self.fee_filter.should_ignore_signal(
-                            signal_to_check, predicted_move_pct, signal_to_check.confidence
-                        )
-                        if should_ignore:
-                            self._signals_rejected_by_fee_filter += 1
-                            logger.info(f"Fee filter rejected signal: {fee_reason}")
-                            if tick_idx % equity_every == 0:
-                                self.equity_curve.append((timestamp, self._calculate_equity_fast()))
-                            continue
-
-                    if risk_action == RiskAction.REDUCE_SIZE:
+                    elif risk_action == RiskAction.REDUCE_SIZE:
                         self._signals_reduced += 1
                         self._open_position(adjusted_signal, state, timestamp, strategy, risk_action.name)
                         self._entry_tick_idx = tick_idx  # [FIXED] Record the tick we opened on
@@ -798,16 +726,12 @@ class BacktestEngine:
         book = state.order_book
         features = state.features
 
-        # [FIX] Minimum hold before flow-based exits: only SL/TP allowed before MIN_HOLD_BEFORE_FLOW_EXIT_SEC
-        hold_duration = (timestamp - self.position.entry_time).total_seconds()
-        flow_exits_allowed = hold_duration >= self.MIN_HOLD_BEFORE_FLOW_EXIT_SEC
-
         if self.position.side == Side.BUY:
             exit_check_price = book.best_bid.price if book.best_bid else book.mid_price
         else:
             exit_check_price = book.best_ask.price if book.best_ask else book.mid_price
 
-        # 1) Hard stop loss (always active, no minimum hold required)
+        # 1) Hard stop loss
         if self.position.side == Side.BUY:
             if exit_check_price <= self.position.stop_loss:
                 return "stop_loss"
@@ -815,7 +739,7 @@ class BacktestEngine:
             if exit_check_price >= self.position.stop_loss:
                 return "stop_loss"
 
-        # 2) Take profit (always active, no minimum hold required)
+        # 2) Take profit
         if self.position.side == Side.BUY:
             if exit_check_price >= self.position.take_profit:
                 return "take_profit"
@@ -823,13 +747,45 @@ class BacktestEngine:
             if exit_check_price <= self.position.take_profit:
                 return "take_profit"
 
-        # [DISABLED] 3a) Absorption against
-        # [DISABLED] 3b) Delta divergence against
+        # 3a) Absorption against
+        if state.absorptions:
+            latest_abs = state.absorptions[-1]
 
-        # [DISABLED] 3c) Exhaustion
+            # Long position exits when BUYERS are absorbed = Resistance forming overhead
+            # (passive sellers are absorbing aggressive buyers = price ceiling)
+            # Do NOT exit when SELLERS are absorbed — that is Support, which helps Longs
+            if (self.position.side == Side.BUY and
+                    latest_abs.absorbing_side == Side.BUY and
+                    latest_abs.strength >= 0.6):  # [FIXED] was Side.SELL
+                return "absorption_against"
 
-        # 3c) Sweep against (requires minimum hold)
-        if flow_exits_allowed and state.sweeps:
+            # Short position exits when SELLERS are absorbed = Support forming below
+            # (passive buyers are absorbing aggressive sellers = price floor)
+            # Do NOT exit when BUYERS are absorbed — that is Resistance, which helps Shorts
+            if (self.position.side == Side.SELL and
+                    latest_abs.absorbing_side == Side.SELL and
+                    latest_abs.strength >= 0.6):  # [FIXED] was Side.BUY
+                return "absorption_against"
+
+        # 3b) Delta divergence against
+        delta_div = features.get("delta_divergence_60s", 0)
+        if delta_div == 1.0:
+            delta_60 = features.get("delta_60s", 0)
+            if self.position.side == Side.BUY and delta_60 < 0:
+                return "delta_divergence_against"
+            if self.position.side == Side.SELL and delta_60 > 0:
+                return "delta_divergence_against"
+
+        # 3c) Exhaustion
+        if self.position.side == Side.BUY:
+            if features.get("buying_exhaustion", 0) >= 1.0:
+                return "buying_exhaustion"
+        else:
+            if features.get("selling_exhaustion", 0) >= 1.0:
+                return "selling_exhaustion"
+
+        # 3d) Sweep against
+        if state.sweeps:
             latest_sweep = state.sweeps[-1]
             if (self.position.side == Side.BUY and
                     latest_sweep.direction == Side.SELL and
@@ -840,71 +796,20 @@ class BacktestEngine:
                     latest_sweep.reversal_strength < 0.4):
                 return "sweep_against_short"
 
-        # 3d) Book pressure collapse (requires minimum hold)
-        if flow_exits_allowed:
-            net_pressure = features.get("net_pressure", 0)
-            if self.position.side == Side.BUY and net_pressure < -0.5:
-                bid_depth = features.get("bid_depth_10", 0)
-                ask_depth = features.get("ask_depth_10", 0)
-                if ask_depth > 0 and bid_depth / (ask_depth + 1e-9) < 0.3:
-                    return "book_pressure_collapse"
-            if self.position.side == Side.SELL and net_pressure > 0.5:
-                bid_depth = features.get("bid_depth_10", 0)
-                ask_depth = features.get("ask_depth_10", 0)
-                if bid_depth > 0 and ask_depth / (bid_depth + 1e-9) < 0.3:
-                    return "book_pressure_collapse"
+        # 3e) Book pressure collapse
+        net_pressure = features.get("net_pressure", 0)
+        if self.position.side == Side.BUY and net_pressure < -0.5:
+            bid_depth = features.get("bid_depth_10", 0)
+            ask_depth = features.get("ask_depth_10", 0)
+            if ask_depth > 0 and bid_depth / (ask_depth + 1e-9) < 0.3:
+                return "book_pressure_collapse"
+        if self.position.side == Side.SELL and net_pressure > 0.5:
+            bid_depth = features.get("bid_depth_10", 0)
+            ask_depth = features.get("ask_depth_10", 0)
+            if bid_depth > 0 and ask_depth / (bid_depth + 1e-9) < 0.3:
+                return "book_pressure_collapse"
 
         return None
-
-    # ------------------------------------------------------------------
-    # Fee filter helper
-    # ------------------------------------------------------------------
-
-    def _estimate_predicted_move(
-        self,
-        state: OrderFlowState,
-        strategy: StrategyDefinition,
-        signal: Optional[Signal] = None,
-    ) -> float:
-        """
-        Estimate the predicted price move based on signal TP distance or ATR + TP multiplier.
-        Used by fee-aware filter to determine if signal covers trading costs.
-
-        [CHANGED 2026-05-27] _estimate_atr now returns a fraction of price (atr_pct),
-        so the formula simplifies: atr_pct * tp_mult (no more / mid_price division).
-        Previously: (atr_dollar * tp_mult) / mid_price
-
-        Priority:
-          1. Use signal take_profit distance when available
-          2. Fall back to atr_pct * tp_mult estimate
-          3. Return min_profit from fee filter as absolute floor
-
-        Returns:
-            Predicted move as decimal (0.01 = 1%), or 0.0 if not calculable
-        """
-        # Priority 1: Use signal TP distance [FIX 5 & 7]
-        if signal is not None and signal.entry_price > 0 and signal.take_profit != signal.entry_price:
-            return abs(signal.take_profit - signal.entry_price) / signal.entry_price
-
-        mid_price = state.order_book.mid_price
-        if mid_price <= 0:
-            return 0.0
-
-        atr_pct = strategy._estimate_atr(state)
-        if atr_pct <= 0:
-            return 0.0
-
-        # Use the regime-appropriate take profit multiplier
-        regime = state.regime
-        if regime == Regime.HIGH_VOLATILITY:
-            tp_mult = strategy.tp_mult_high_vol
-        elif regime in (Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION):
-            tp_mult = strategy.tp_mult_low_vol
-        else:
-            tp_mult = strategy.tp_mult_trending
-
-        predicted_move_pct = atr_pct * tp_mult
-        return predicted_move_pct
 
     # ------------------------------------------------------------------
     # Open/Close position
@@ -923,9 +828,12 @@ class BacktestEngine:
         best_bid = book.best_bid.price if book.best_bid else book.mid_price
         best_ask = book.best_ask.price if book.best_ask else book.mid_price
 
-        # LONG-ONLY: Always go long
-        entry_price = best_ask * (1 + self.slippage_pct)
-        side = Side.BUY
+        if signal.signal_type in [SignalType.BUY, SignalType.STRONG_BUY]:
+            entry_price = best_ask * (1 + self.slippage_pct)
+            side = Side.BUY
+        else:
+            entry_price = best_bid * (1 - self.slippage_pct)
+            side = Side.SELL
 
         position_value = self.capital * signal.position_size
         size = position_value / entry_price
@@ -958,7 +866,7 @@ class BacktestEngine:
             entry_fee=entry_fee,
         )
 
-        self.risk_manager.record_trade_opened(entry_price, size, side, timestamp)
+        self.risk_manager.record_trade_opened(entry_price, size, side)
         self._last_signal_time = timestamp
         self._last_signal_strategy = strategy.name
 
@@ -1022,8 +930,6 @@ class BacktestEngine:
             duration_seconds=duration,
             signal_confidence=self.position.signal.confidence,
             risk_action=self.position.risk_action,
-            stop_loss=self.position.stop_loss,
-            take_profit=self.position.take_profit,
         ))
 
         self.risk_manager.record_trade_closed(pnl)
@@ -1181,7 +1087,6 @@ class BacktestEngine:
         metrics.signals_reduced_by_risk = self._signals_reduced
         metrics.halts_triggered = self._halts
         metrics.suspicious_pnl_rejected = self._suspicious_rejected
-        metrics.signals_rejected_by_fee_filter = self._signals_rejected_by_fee_filter
 
         return metrics
 

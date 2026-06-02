@@ -35,7 +35,7 @@ class LLMProvider(str, Enum):
 
 class TradingConfig(BaseModel):
     """Core trading parameters"""
-    symbol: str = "XRP/USDT"
+    symbol: str = "BTC/USDT"
     exchange: Exchange = Exchange.BINANCE
     
     # Position limits
@@ -45,12 +45,12 @@ class TradingConfig(BaseModel):
     # Risk limits
     max_daily_loss_pct: float = 0.02  # 2%
     max_drawdown_pct: float = 0.05  # 5%
-    max_consecutive_losses: int = 5
+    max_consecutive_losses: int = 20
     
     # Execution
     min_time_between_trades_sec: int = 30
     slippage_estimate_pct: float = 0.0005  # 0.05%
-    fee_pct: float = 0.0004  # 0.04% maker
+    fee_pct: float = 0.0005   # 0.05% taker (Binance futures)
     
     #Add tick_size to the TradingConfig so it can be passed to the feature engine.
     tick_size: float = 0.0001  # <--- XRP typically uses 0.0001 or 0.01
@@ -192,12 +192,59 @@ class BacktestConfig(BaseModel):
     min_data_points: int = 100000
 
 
+class FeeAwareFilterConfig(BaseModel):
+    """Fee-aware signal filter configuration (Futures)"""
+    enabled: bool = True
+    maker_fee_pct: float = 0.0002
+    taker_fee_pct: float = 0.0005
+    expected_spread_pct: float = 0.0001
+    min_profit_target_pct: float = 0.0002
+
+
+class DataFilteringConfig(BaseModel):
+    """Historical data pre-filtering configuration (Futures)"""
+    enabled: bool = True
+    maker_fee_pct: float = 0.0002
+    taker_fee_pct: float = 0.0005
+    min_spread_pct: float = 0.0001
+    lookforward_window_ticks: int = 100
+    save_filtered_copy: bool = True
+
+
+class OnChainConfig(BaseModel):
+    """On-chain data configuration"""
+    enabled: bool = False
+    api_key: Optional[str] = Field(default_factory=lambda: os.getenv("GLASSNODE_API_KEY"))
+    cache_ttl_seconds: int = 3600
+    metrics: List[str] = [
+        "exchange_inflow_volume", "sopr", "nupl",
+        "mvrv_ratio", "active_addresses"
+    ]
+
+
+class MLEnsembleConfig(BaseModel):
+    """ML ensemble prediction configuration"""
+    enabled: bool = False
+    model_dir: str = "models/ml_ensemble"
+    weights: Dict[str, float] = {
+        "xgboost": 0.4,
+        "lightgbm": 0.4,
+        "lstm": 0.2,
+    }
+    min_confidence: float = 0.7
+    retrain_interval_days: int = 7
+
+
 class Settings(BaseModel):
     """Master settings container"""
     trading: TradingConfig = TradingConfig()
     llm: LLMConfig = LLMConfig()
     optuna: OptunaConfig = OptunaConfig()
     backtest: BacktestConfig = BacktestConfig()
+    fee_aware_filter: FeeAwareFilterConfig = FeeAwareFilterConfig()
+    data_filtering: DataFilteringConfig = DataFilteringConfig()
+    onchain: OnChainConfig = OnChainConfig()
+    ml_ensemble: MLEnsembleConfig = MLEnsembleConfig()
 
 
 # Global settings instance

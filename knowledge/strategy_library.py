@@ -14,7 +14,6 @@ from core.data_structures import (
     OrderFlowState, Signal, SignalType, Side, Regime
 )
 
-
 class StrategyCategory(Enum):
     ABSORPTION = auto()
     MOMENTUM = auto()
@@ -111,6 +110,32 @@ class StrategyDefinition:
     filters: List[StrategyCondition] = field(default_factory=list)
     allowed_regimes: List[Regime] = field(default_factory=lambda: list(Regime))
     
+    # ML ensemble (optional, set externally)
+    ml_ensemble: Optional[object] = None
+    ml_min_confidence: float = 0.7
+
+    # ML ensemble lazy loading state (not a dataclass field, set in __post_init__)
+    _ml_available: bool = False
+    _ml_loaded: bool = False
+
+    def __post_init__(self) -> None:
+        """Post-initialization to set non-dataclass defaults"""
+        self._ml_available = False
+        self._ml_loaded = False
+
+    def _load_ml_ensemble(self) -> None:
+        """Lazy-load ML ensemble module only when accessed"""
+        if self._ml_loaded:
+            return
+        self._ml_loaded = True
+        try:
+            from prediction.ml_ensemble import MLEnsemble
+            self._ml_available = True
+            logger.debug("[StrategyDefinition] ML ensemble module loaded")
+        except ImportError:
+            self._ml_available = False
+            logger.debug("[StrategyDefinition] ML ensemble module not available (optional)")
+
     # Position sizing
     base_position_pct: float = 0.1
     max_position_pct: float = 0.25
@@ -206,12 +231,16 @@ class StrategyDefinition:
             sl_mult, tp_mult = self.sl_mult_trending, self.tp_mult_trending
             logger.debug(f"[{self.name}] Using TRENDING multipliers: SL={sl_mult}, TP={tp_mult}")
         
-        # Calculate stops using selected multipliers
-        atr = self._estimate_atr(state)
+        # [CHANGED 2026-05-27] ATR is now a fraction of price (atr_pct).
+        # stop_dist = atr_pct * mid_price * sl_mult  → distance in price units
+        # Previously: stop_dist = atr_dollar * sl_mult  (with 0.5% floor overriding real ATR)
+        # WHY: percentage ATR works at any price level and across assets.
+        # TO REVERT: change back to: stop_dist = atr_dollar * sl_mult; tp_dist = atr_dollar * tp_mult
+        atr_pct = self._estimate_atr(state)
         mid_price = state.order_book.mid_price
         
-        stop_dist = atr * sl_mult
-        tp_dist = atr * tp_mult
+        stop_dist = mid_price * atr_pct * sl_mult
+        tp_dist = mid_price * atr_pct * tp_mult
         
         # Enforce minimum TP distance (0.37% of price)
         min_tp_dist = mid_price * 0.0037
@@ -233,7 +262,42 @@ class StrategyDefinition:
                              self.max_position_pct)
         
         confidence = min(total_score / (self.min_score_threshold * 2), 1.0)
-        
+
+        # ML ensemble check (optional, lazy-loaded)
+        self._load_ml_ensemble()
+        if self.ml_ensemble is not None and self._ml_available:
+            try:
+                # Extract features from state for ML prediction
+                ml_features = self._extract_ml_features(state)
+                prediction = self.ml_ensemble.predict(
+                    ml_features,
+                    confidence_threshold=self.ml_min_confidence
+                )
+
+                # Check ML confidence threshold
+                if prediction.confidence < self.ml_min_confidence:
+                    logger.debug(
+                        f"[{self.name}] ML REJECTED: confidence {prediction.confidence:.2f} "
+                        f"< {self.ml_min_confidence:.2f}"
+                    )
+                    return None
+
+                # Check ML direction agrees with rule-based signal
+                ml_direction = "BUY" if direction in (SignalType.BUY, SignalType.STRONG_BUY) else "SELL"
+                if prediction.decision != ml_direction:
+                    logger.debug(
+                        f"[{self.name}] ML REJECTED: ML says {prediction.decision}, "
+                        f"rule says {ml_direction}"
+                    )
+                    return None
+
+                logger.debug(
+                    f"[{self.name}] ML APPROVED: {prediction.decision} @ "
+                    f"confidence={prediction.confidence:.2f}"
+                )
+            except Exception as e:
+                logger.warning(f"[{self.name}] ML ensemble error (proceeding without ML): {e}")
+
         # DEBUG: Log signal generation
         logger.info(f"[{self.name}] SIGNAL: {direction.name} @ {mid_price:.4f} | "
                    f"SL={stop_loss:.4f} TP={take_profit:.4f} | "
@@ -253,41 +317,83 @@ class StrategyDefinition:
         )
     
     def _determine_direction(self, state: OrderFlowState, score: float) -> SignalType:
-        """Determine signal direction from state"""
+        """Determine signal direction from state using normalized features.
+        LONG-ONLY: Never returns SELL or STRONG_SELL."""
         features = state.features
-        
-        # Use delta and imbalance to determine direction
-        delta = features.get("delta_60s", 0)
+        delta_pct = features.get("delta_pct_60s", 0)
         imbalance = features.get("depth_imbalance_10", 0)
         pressure = features.get("net_pressure", 0)
         
-        bullish_score = sum([
-            delta > 0,
-            imbalance > 0.1,  # Preserve the existing noise filter threshold
-            pressure > 0
-        ])
+        # Absolute features for magnitude-based scoring [FIX 1 & 2]
+        abs_imbalance = features.get("abs_depth_imbalance_10", 0)
+        abs_delta_pct = features.get("abs_delta_pct_60s", 0)
         
-        if bullish_score == 3:
+        directional_score = 0
+        
+        # Imbalance: use sign with magnitude thresholds
+        if abs(imbalance) > 0.1:
+            directional_score += 1 if imbalance > 0 else -1
+        if abs(imbalance) > 0.3:
+            directional_score += 1 if imbalance > 0 else -1
+        
+        # Absolute imbalance magnitude adds conviction [FIX 3]
+        if abs_imbalance > 0.3:
+            directional_score += 1 if imbalance > 0 else -1
+        
+        # Delta: use delta_pct_60s with meaningful threshold
+        if abs(delta_pct) > 0.1:
+            directional_score += 1 if delta_pct > 0 else -1
+        
+        # Absolute delta magnitude adds conviction [FIX 3]
+        if abs_delta_pct > 0.3:
+            directional_score += 1 if delta_pct > 0 else -1
+        
+        # Pressure: use sign with MEANINGFUL magnitude threshold
+        if abs(pressure) > 50000:
+            directional_score += 1 if pressure > 0 else -1
+        
+        # LONG-ONLY: Never return SELL/STRONG_SELL
+        if directional_score >= 2:
             return SignalType.STRONG_BUY if score > self.min_score_threshold * 1.5 else SignalType.BUY
-        elif bullish_score == 2:
+        elif directional_score >= 0:
             return SignalType.BUY
-        elif bullish_score == 1:
-            return SignalType.NEUTRAL # Ambiguous — 1 of 3 indicators bullish, no clear edge
-        elif bullish_score == 0:
-            # Use score parameter for downside signals too (was unused for 0/3 case)
-            return SignalType.STRONG_SELL if score > self.min_score_threshold * 1.5 else SignalType.SELL
+        else:
+            return SignalType.NEUTRAL
         
     
     def _estimate_atr(self, state: OrderFlowState, default: float = 100.0) -> float:
-        """Estimate ATR for stop/TP placement.
+        """
+        Estimate ATR as a fraction of price (e.g., 0.0025 = 0.25%).
+        [CHANGED 2026-05-27] Previously returned dollar ATR with a 0.5% floor.
+        
+        WHY (percentage, not dollar):
+          Dollar ATR with a mid_price * 0.005 floor meant the real ATR computation
+          was never used — the floor always dominated. Converting to percentage:
+          1. Works across price levels — XRP at $0.30 or $3.50 gives same ATR%
+          2. Works across assets — no recalibration needed for BTC, ETH, etc.
+          3. The massive 0.5% floor is replaced by a small 0.1% floor — the real
+             tick-level ATR now drives SL/TP most of the time
+          4. Multipliers (2.5x, 6.0x) now multiply a percentage, producing consistent
+             percentage distances regardless of price
+        
+        Floor: max(atr_pct, 0.001) = 0.1% of price minimum.
+          - Old floor was 0.5% (always > real ATR for XRP tick data → floor dominated)
+          - New floor 0.1% prevents spread-noise stops while rarely dominating
+          - For XRP tick data: ATR median = 0.009%, 90th %ile = 0.012%, so floor
+            dominates ~95% of the time (the tick-period ATR is too short to be useful)
+          - For longer timeframes or volatile assets, real ATR exceeds 0.1% and drives stops
+          - TO ADJUST: Change 0.001 below to desired minimum ATR fraction
+        
+        TO REVERT (to old dollar ATR with 0.5% floor):
+          1. Change floor from 0.001 to 0.005, and multiply by mid_price to get dollars
+          2. Return max(atr_dollar, mid_price * 0.005) instead of max(atr_pct, 0.001)
+          3. In evaluate(): stop_dist = atr * sl_mult (replace atr_pct * mid_price * sl_mult)
+          4. In engine.py _estimate_predicted_move(): (atr * tp_mult) / mid_price
         
         Priority order:
-          1. Use atr_60s from FeatureEngine if available (most accurate)
-          2. Use price_range_60s as a proxy if atr_60s missing
-          3. Fall back to 0.5% of mid price (last resort)
-        
-        Always enforce a minimum of 0.5% of price so stops are never
-        tighter than the spread.
+          1. atr_60s from FeatureEngine (dollar → divide by mid_price for percentage)
+          2. price_range_60s as proxy
+          3. Fallback: 0.1% of mid price
         """
         mid_price = state.order_book.mid_price
         if mid_price <= 0:
@@ -295,16 +401,74 @@ class StrategyDefinition:
 
         features = state.features
 
-        # Priority 1: Real ATR from feature engine  # [FIXED]
+        # Priority 1: Real ATR from feature engine (dollar → convert to percentage)
         if features.get("atr_60s", 0) > 0:
-            return max(features["atr_60s"], mid_price * 0.005)
+            atr_dollar = features["atr_60s"]
+        # Priority 2: Price range as ATR proxy
+        elif features.get("price_range_60s", 0) > 0:
+            atr_dollar = features["price_range_60s"]
+        else:
+            # Priority 3: Fallback — 0.1% of mid price
+            atr_dollar = mid_price * 0.001
 
-        # Priority 2: Price range as ATR proxy  # [FIXED]
-        if features.get("price_range_60s", 0) > 0:
-            return max(features["price_range_60s"], mid_price * 0.005)
+        # Convert dollar ATR to percentage of price (e.g., $0.00012 / $1.33 = 0.00009 = 0.009%)
+        atr_pct = atr_dollar / mid_price
 
-        # Priority 3: Fallback — 0.5% of price
-        return mid_price * 0.005
+        # Floor: 0.1% of price. Prevents spread-noise stops on tick data.
+        # Old floor was 0.5% (5x larger) which always dominated.
+        # NOTE: For tick-level data, ATR period=14 gives tiny values (~0.009%).
+        # Consider increasing ATR period in precomputer if floor dominates too much.
+        return max(atr_pct, 0.001)
+
+    def _extract_ml_features(self, state: OrderFlowState) -> dict:
+        """
+        Extract features from OrderFlowState for ML ensemble prediction.
+        Converts FeatureEngine output into the format expected by ML models.
+
+        Returns a dict with numeric feature values.
+        """
+        features = state.features
+        if not features:
+            return {}
+
+        ml_features = {}
+
+        # Price-derived features
+        for key in ['mid_price', 'spread_bps', 'price_change_pct_60s',
+                     'price_change_pct_300s', 'price_range_60s', 'price_range_300s',
+                     'price_vs_vwap_pct', 'price_vs_poc_pct']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Volume features
+        for key in ['volume_acceleration', 'volume_30s', 'volume_60s',
+                     'volume_300s', 'trade_count_60s', 'trade_intensity_60s']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Delta / order flow
+        for key in ['delta_60s', 'delta_300s', 'abs_delta_60s', 'delta_pct_60s',
+                     'delta_pct_300s', 'cvd_60s', 'cvd_300s']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Depth / book features
+        for key in ['depth_imbalance_10', 'depth_imbalance_20',
+                     'bid_depth_10', 'ask_depth_10', 'net_pressure',
+                     'slope_asymmetry', 'book_trade_agreement']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        # Technical features
+        for key in ['atr_60s', 'atr_300s', 'exhaustion_score',
+                     'buying_exhaustion', 'selling_exhaustion',
+                     'in_value_area', 'va_breakout_potential',
+                     'footprint_imbalance_count', 'pressure_confirmed']:
+            if key in features:
+                ml_features[key] = features[key]
+
+        logger.debug(f"[_extract_ml_features] Extracted {len(ml_features)} features")
+        return ml_features
 
 
 # ==================== PRE-DEFINED STRATEGIES ====================
@@ -324,10 +488,10 @@ def create_absorption_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="recent_absorption_strength",
                 operator=">=",
-                threshold=0.30,
+                threshold=0.10,
                 weight=2.0,
-                required=True,
-                param_key="abs__entry_str_min"  # Optimizer controls this threshold
+                required=False,
+                param_key="abs__entry_str_min"
             ),
             StrategyCondition(
                 feature="volume_acceleration",
@@ -351,7 +515,7 @@ def create_absorption_strategy() -> StrategyDefinition:
                 param_key="abs__entry_delta_min"
             ),
             StrategyCondition(
-                feature="depth_imbalance_10",
+                feature="abs_depth_imbalance_10",
                 operator=">",
                 threshold=0.05,
                 weight=1.0,
@@ -361,7 +525,7 @@ def create_absorption_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="price_vs_poc_pct",
                 operator="between",
-                threshold=-0.005,  # Will be overridden by optimizer via param_key
+                threshold=-0.005,
                 threshold_high=0.005,
                 weight=0.5,
                 param_key="abs__entry_poc_range"
@@ -370,63 +534,46 @@ def create_absorption_strategy() -> StrategyDefinition:
                 feature="book_trade_agreement",
                 operator="==",
                 threshold=1.0,
-                weight=1.5,       # High weight — strongly preferred but not required
-                required=False,   # NOT required: early absorption entries lag trade flow
-                                  # Making it required would filter out the best entries
-                param_key="abs__entry_agreement"   # Exposed to optimizer  # [FIXED]
+                weight=1.5,
+                required=False,
+                param_key="abs__entry_agreement"
             ),
         ],
         
         filters=[
-            # Spread filter: REJECT if spread > threshold
             StrategyCondition(
                 feature="spread_bps",
                 operator=">",
-                threshold=15.0,
-                param_key="abs__filter_spread_max"
+                threshold=15.0
             ),
-            # Depth filters: REJECT if depth < threshold (illiquidity protection)
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=1500.0,
-                param_key="abs__filter_bid_min"
+                threshold=5000.0
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=1500.0,
-                param_key="abs__filter_ask_min"
-            ),
-            # Price change filter: REJECT if outside symmetric range (dead/choppy market protection)
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.005,
-                threshold_high=0.005,
-                param_key="abs__filter_chg300_range"
+                threshold=5000.0
             ),
         ],
         
         min_conditions_satisfied=2,
         min_score_threshold=2.5,
         
-        # Base risk parameters (optimizer can override via param_keys below)
-        stop_loss_atr_mult=2.5,
-        take_profit_atr_mult=6.0,
-        trailing_stop_activation_pct=0.005,
-        
-        # CRITICAL: Regime-specific multipliers exposed to optimizer
-        sl_mult_high_vol=3.5,
-        sl_mult_low_vol=1.8,
-        sl_mult_trending=2.5,
-        tp_mult_high_vol=7.0,
-        tp_mult_low_vol=2.5,
-        tp_mult_trending=5.0,
-        
+        # [ICP-OPT] Trailing stop exits (SL=0.7%, trail activates at +1.0%)
+        sl_mult_high_vol=7.0,
+        sl_mult_low_vol=7.0,
+        sl_mult_trending=7.0,
+        tp_mult_high_vol=100.0,
+        tp_mult_low_vol=100.0,
+        tp_mult_trending=100.0,
+        trailing_stop_activation_pct=0.01,
+
         allowed_regimes=[
             Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION, 
-            Regime.TRENDING_UP, Regime.TRENDING_DOWN
+            Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.BREAKOUT,
+            Regime.HIGH_VOLATILITY, Regime.LOW_LIQUIDITY
         ]
     )
 
@@ -505,18 +652,12 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
-            ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -525,15 +666,18 @@ def create_delta_divergence_strategy() -> StrategyDefinition:
         # FIX 2: 3:1 risk/reward ratio
         stop_loss_atr_mult=2.0,
         take_profit_atr_mult=6.0,
-        allowed_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.RANGING]
+        allowed_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION]
     )
 
 
 def create_liquidity_sweep_strategy() -> StrategyDefinition:
     """
-    Liquidity Sweep Strategy
-    
-    Enters after a stop hunt / liquidity sweep reverses.
+    Liquidity Sweep Strategy — DISABLED
+    ======================================
+    NOTE: recent_sweep_detected fires 0.0% of ticks in XRP data.
+    This strategy produces ZERO trades. It is kept for future use
+    when sweep detection is recalibrated for low-volatility assets.
+    DO NOT include in active strategy rotation.
     """
     return StrategyDefinition(
         name="Liquidity Sweep",
@@ -590,18 +734,12 @@ def create_liquidity_sweep_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
-            ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -637,14 +775,14 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
             ),
             # Delta confirms direction
             StrategyCondition(
-                feature="delta_pct_60s",
+                feature="abs_delta_pct_60s",
                 operator=">",
                 threshold=0.2,
                 weight=1.5
             ),
             # Book supports
             StrategyCondition(
-                feature="depth_imbalance_10",
+                feature="abs_depth_imbalance_10",
                 operator=">",
                 threshold=0.15,
                 weight=1.5
@@ -671,32 +809,44 @@ def create_stacked_imbalance_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="spread_bps",
                 operator=">",
-                threshold=8.0  # Reject wide spreads
+                threshold=15.0  # Reject wide spreads (>15bps)
             ),
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=5000.0  # Reject thin bids (<5000 total)
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
+                threshold=5000.0  # Reject thin asks (<5000 total)
+            ),
+            # [FIX] Reject extreme volatility only (>5% in 5min)
+            StrategyCondition(
+                feature="price_change_pct_300s",
+                operator=">",
+                threshold=0.05
             ),
             StrategyCondition(
                 feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                operator="<",
+                threshold=-0.05
             ),
         ],
         
         min_conditions_satisfied=2,
         min_score_threshold=2.5,
-        # FIX 2: 3:1 risk/reward ratio
-        stop_loss_atr_mult=2.0,
-        take_profit_atr_mult=6.0,
-        allowed_regimes=[Regime.TRENDING_UP, Regime.TRENDING_DOWN, Regime.BREAKOUT, Regime.ACCUMULATION, Regime.DISTRIBUTION] #Add Regime.ACCUMULATION, Regime.DISTRIBUTION
+        # ICP-optimized: trailing stop with wide SL (fee+slippage ~0.16%/side)
+        sl_mult_high_vol=7.0,
+        sl_mult_low_vol=7.0,
+        sl_mult_trending=7.0,
+        tp_mult_high_vol=100.0,
+        tp_mult_low_vol=100.0,
+        tp_mult_trending=100.0,
+        trailing_stop_activation_pct=0.01,
+        base_position_pct=0.95,
+        scale_with_score=False,
+        max_position_pct=0.95,
     )
 
 
@@ -766,18 +916,12 @@ def create_value_area_strategy() -> StrategyDefinition:
             StrategyCondition(
                 feature="bid_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin bids
+                threshold=150000.0  # XRP-specific: reject thin bids
             ),
             StrategyCondition(
                 feature="ask_depth_10",
                 operator="<",
-                threshold=3.0  # Reject thin asks
-            ),
-            StrategyCondition(
-                feature="price_change_pct_300s",
-                operator="between",
-                threshold=-0.008,
-                threshold_high=0.008  # Reject dead/choppy markets
+                threshold=150000.0  # XRP-specific: reject thin asks
             ),
         ],
         
@@ -786,7 +930,7 @@ def create_value_area_strategy() -> StrategyDefinition:
         # FIX 2: 3:1 risk/reward ratio
         stop_loss_atr_mult=2.0,
         take_profit_atr_mult=6.0,
-        allowed_regimes=[Regime.RANGING]
+        allowed_regimes=[Regime.RANGING, Regime.ACCUMULATION, Regime.DISTRIBUTION]
     )
 
 
